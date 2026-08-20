@@ -269,7 +269,36 @@ function LightView() {
     return () => clearInterval(interval)
   }, [nitro])
 
-  // 6. Debug: periodic window snapshot into Documents/snap.png so rendering
+  // 6. Watchdog: external UVC cameras (the Insta360) can silently stall
+  // their stream - no AVFoundation interruption, error, or stop event fires
+  // and the session still reports running (verified via thread sample: the
+  // frame thread just idles waiting for work). Detect a frozen frameCount
+  // and bounce the session via isActive.
+  const [cameraSuspended, setCameraSuspended] = useState(false)
+  const watchdog = useMemo(() => ({ lastCount: -1, stalledTicks: 0 }), [])
+  useEffect(() => {
+    if (nitro == null || pipeline == null) return
+    const interval = setInterval(() => {
+      const count = nitro.getStatus().frameCount
+      if (count === watchdog.lastCount && count > 0 && !cameraSuspended) {
+        watchdog.stalledTicks += 1
+        if (watchdog.stalledTicks >= 2) {
+          console.log(
+            `[LightDemo] camera stall detected (frameCount frozen at ${count}) - restarting session`,
+          )
+          watchdog.stalledTicks = 0
+          setCameraSuspended(true)
+          setTimeout(() => setCameraSuspended(false), 600)
+        }
+      } else {
+        watchdog.stalledTicks = 0
+      }
+      watchdog.lastCount = count
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [nitro, pipeline, cameraSuspended, watchdog])
+
+  // 7. Debug: periodic window snapshot into Documents/snap.png so rendering
   // can be verified headlessly from outside the app.
   useEffect(() => {
     if (!__DEV__) return
@@ -769,7 +798,7 @@ function LightView() {
   })
 
   useCamera({
-    isActive: pipeline != null && nitro != null && cameraDevice != null,
+    isActive: pipeline != null && nitro != null && cameraDevice != null && !cameraSuspended,
     device: cameraDevice as NonNullable<typeof cameraDevice>,
     outputs: [frameOutput],
     constraints: CAMERA_CONSTRAINTS,
