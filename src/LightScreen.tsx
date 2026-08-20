@@ -333,9 +333,16 @@ function LightView() {
 
   const devices = useCameraDevices()
   // Never pick a Continuity Camera (iPhone). Prefer USB/external cameras,
-  // then the built-in front camera.
+  // then the built-in front camera. A crashed UVC driver can leave a
+  // phantom "NULL Camera" device behind that fails every session config
+  // with AVFoundation -11800 '!obj' - never select it.
   const cameraDevice = useMemo(() => {
-    const real = devices.filter((d) => !d.isContinuityCamera && d.type !== 'continuity')
+    const real = devices.filter(
+      (d) =>
+        !d.isContinuityCamera &&
+        d.type !== 'continuity' &&
+        !d.localizedName.includes('NULL'),
+    )
     const device =
       real.find((d) => d.type === 'external') ??
       real.find((d) => d.position === 'front') ??
