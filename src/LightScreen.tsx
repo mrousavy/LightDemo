@@ -395,6 +395,8 @@ function LightView() {
       velY: 0,
       lostFrames: 0,
       handSizeSmoothed: 0,
+      grabRefSize: 0,
+      zSceneEnvelope: -0.3,
       // Cached zero-copy depth import, keyed by the IOSurface pointer. With
       // CoreML output backings the pointer is stable, so the import and
       // bind group happen once and only the access window is per-frame.
@@ -577,6 +579,10 @@ function LightView() {
                     box.grabbed = true
                     box.everControlled = true
                     box.releaseFrames = 0
+                    // Re-reference the proximity control at each grab: z
+                    // moves relative to the hand's size at THIS grab.
+                    box.grabRefSize = 0
+                    box.zSceneEnvelope = -0.7
                   }
                 } else {
                   box.pinchFrames = 0
@@ -601,43 +607,58 @@ function LightView() {
                   //
                   // 1. SCENE-COHERENT BASE: the depth map sampled at the
                   //    fingertips (nearest disparity over small tap
-                  //    neighborhoods). This is the hand's z in the SAME
-                  //    normalized space the shading/occlusion uses, so the
-                  //    bulb is guaranteed to sit in front of whatever the
-                  //    hand is in front of (e.g. your face).
+                  //    neighborhoods) - the hand's z in the SAME normalized
+                  //    space the shading/occlusion uses, so the bulb sits in
+                  //    front of whatever the hand is in front of (e.g. your
+                  //    face). Run through an envelope follower (fast rise,
+                  //    slow decay): single mis-tracked taps hitting the
+                  //    background can no longer yank the light behind you
+                  //    for a frame, while genuinely moving away still lowers
+                  //    it within a few frames.
                   //
-                  // 2. PROXIMITY EXTENSION: hand size (wrist->knuckle span,
-                  //    ~1/distance - the only absolute-ish cue; relative
-                  //    depth normalizes the nearest object to ~the same
-                  //    value regardless of physical distance). When the hand
-                  //    is deliberately pulled toward the camera it pushes
-                  //    the light beyond the scene plane - big bulb, toward
-                  //    the viewer - which pure scene depth cannot express.
+                  // 2. RELATIVE PROXIMITY: hand size (wrist->knuckle span,
+                  //    ~1/distance) measured against its size AT GRAB TIME.
+                  //    Relative depth cannot express the hand's own distance
+                  //    (the nearest object always normalizes the same), but
+                  //    the size RATIO since the grab can: closer than where
+                  //    you grabbed pushes the light out toward the viewer,
+                  //    farther pulls it deeper - intuitive at any seating
+                  //    distance, no calibration constants.
                   const nearest = nitro.sampleDepthMax([
                     hand.thumbX, hand.thumbY,
                     hand.indexX, hand.indexY,
                     hand.midX, hand.midY,
                   ])
-                  let zScene = box.lightZ
                   if (nearest >= 0) {
                     const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
                     const normalized = Math.min(
                       Math.max((nearest - box.rangeLow) / span, 0),
                       1,
                     )
-                    zScene = -0.7 + normalized * 0.7 + 0.04
+                    const zSample = -0.7 + normalized * 0.7 + 0.04
+                    box.zSceneEnvelope =
+                      zSample >= box.zSceneEnvelope
+                        ? zSample
+                        : Math.max(zSample, box.zSceneEnvelope - 0.02)
                   }
                   if (hand.handSize > 0) {
                     box.handSizeSmoothed =
                       box.handSizeSmoothed <= 0
                         ? hand.handSize
                         : box.handSizeSmoothed + (hand.handSize - box.handSizeSmoothed) * 0.3
+                    if (box.grabRefSize <= 0) box.grabRefSize = box.handSizeSmoothed
                   }
-                  const proximity = Math.min(
-                    Math.max((box.handSizeSmoothed - 0.26) / (0.45 - 0.26), 0),
-                    1,
-                  )
-                  const targetZ = zScene + proximity * 1.0
+                  let sizeOffset = 0
+                  if (box.grabRefSize > 0 && box.handSizeSmoothed > 0) {
+                    // Lower clamp is shallow: the scene sample already
+                    // tracks a receding hand; a deep negative offset dug
+                    // the light through the back wall.
+                    sizeOffset = Math.min(
+                      Math.max((box.handSizeSmoothed / box.grabRefSize - 1) * 2.2, -0.2),
+                      1.2,
+                    )
+                  }
+                  const targetZ = box.zSceneEnvelope + sizeOffset
                   box.lightZ += (targetZ - box.lightZ) * 0.25
                 }
               }
@@ -694,6 +715,25 @@ function LightView() {
             box.lightZ = controlsNow.lightZ
           }
           box.lightZ = Math.min(Math.max(box.lightZ, LIGHT_Z_MIN), LIGHT_Z_MAX)
+
+          // Physical invariant: the light can never sit BEHIND the visible
+          // surface at its own screen position - a hand holding it is in
+          // front of that surface by definition of being visible. The small
+          // tolerance still lets the bulb duck just behind a near object
+          // (chair-hiding works: occlusion only needs z < that surface).
+          if (box.everControlled && !controlsNow.touchActive) {
+            const bufLX = mirrored ? 1 - box.lightX : box.lightX
+            const floorSample = nitro.sampleDepthMax([bufLX, box.lightY])
+            if (floorSample >= 0) {
+              const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
+              const floorNorm = Math.min(
+                Math.max((floorSample - box.rangeLow) / span, 0),
+                1,
+              )
+              const zFloor = -0.7 + floorNorm * 0.7 - 0.08
+              if (box.lightZ < zFloor) box.lightZ = zFloor
+            }
+          }
 
           // --- relight uniforms ---
           const modelAspect = pipeline.depthW / pipeline.depthH
