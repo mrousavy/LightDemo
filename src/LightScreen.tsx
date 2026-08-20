@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  ActivityIndicator,
   Linking,
   PixelRatio,
   Pressable,
@@ -874,6 +875,18 @@ function LightView() {
           setControls((c) => ({ ...c, touchActive: false }))
         }}>
         <Canvas ref={ref} style={styles.canvas} />
+        {(nitro == null || pipeline == null || (status?.frameCount ?? 0) === 0) && (
+          <View style={styles.loadingOverlay} pointerEvents="none">
+            <ActivityIndicator size="large" color="#ffffff" />
+            <Text style={styles.loadingText}>
+              {nitro == null
+                ? 'Loading depth model…'
+                : pipeline == null
+                  ? 'Preparing GPU pipelines…'
+                  : 'Starting camera…'}
+            </Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.toolbar}>
@@ -976,4 +989,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     textAlign: 'center',
   },
+  loadingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    backgroundColor: 'rgba(0, 0, 0, 0.55)',
+  },
+  loadingText: { color: 'white', fontSize: 15, fontWeight: '600' },
 })
