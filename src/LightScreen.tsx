@@ -587,7 +587,8 @@ function LightView() {
                   }
                 } else {
                   box.pinchFrames = 0
-                  // Hover-steering: drift toward the hand(s) center.
+                  // Hover-steering: drift toward the hand(s) center - and
+                  // in DEPTH too, toward the nearer followed hand's plane.
                   if (!controlsNow.touchActive) {
                     let cx = 0
                     let cy = 0
@@ -601,6 +602,24 @@ function LightView() {
                     box.lightX += (cx - box.lightX) * 0.06
                     box.lightY += (cy - box.lightY) * 0.06
                     freshHandUpdate = true
+                    let hoverNearest = -1
+                    for (const d of detail) {
+                      const s = nitro.sampleDepthMax([
+                        d.h.thumbX, d.h.thumbY,
+                        d.h.indexX, d.h.indexY,
+                        d.h.midX, d.h.midY,
+                      ])
+                      if (s > hoverNearest) hoverNearest = s
+                    }
+                    if (hoverNearest >= 0) {
+                      const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
+                      const hoverNorm = Math.min(
+                        Math.max((hoverNearest - box.rangeLow) / span, 0),
+                        1,
+                      )
+                      const hoverZ = -0.7 + hoverNorm * 0.7 + 0.04
+                      box.lightZ += (hoverZ - box.lightZ) * 0.08
+                    }
                   }
                 }
               }
