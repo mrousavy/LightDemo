@@ -67,7 +67,12 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private var handSeq: Int = -1
   private var latestHand: HandResult
 
-  // Face-based orientation auto-calibration (see spec docs).
+  // Face-based orientation auto-calibration (see spec docs). The scan runs
+  // on its own low-priority queue: it is auxiliary calibration data (not
+  // per-frame-coherent like depth/hands), and running it inline caused a
+  // ~5-10ms frame-time spike every few seconds.
+  private let orientationScanQueue = DispatchQueue(label: "light.orientation", qos: .utility)
+  private var orientationScanInFlight = false
   private var orientationScanCountdown = 0
   private var lastRollDeg: Double = -999
 
@@ -165,10 +170,21 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     // every ~4s - gimbal cameras can physically rotate mid-session.
     orientationScanCountdown -= 1
     if orientationScanCountdown <= 0 {
-      scanOrientation(on: pixelBuffer)
       lock.lock()
+      let busy = orientationScanInFlight
       let seen = lastRollDeg > -900
+      if !busy { orientationScanInFlight = true }
       lock.unlock()
+      if !busy {
+        // Capturing the CVPixelBuffer retains it past the frame's dispose.
+        orientationScanQueue.async { [weak self] in
+          guard let self else { return }
+          self.scanOrientation(on: pixelBuffer)
+          self.lock.lock()
+          self.orientationScanInFlight = false
+          self.lock.unlock()
+        }
+      }
       orientationScanCountdown = seen ? 120 : 30
     }
 
