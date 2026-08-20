@@ -11,6 +11,7 @@ import {
 import {
   Canvas,
   useCanvasRef,
+  type GPUSharedTextureMemory,
   type NativeCanvas,
   type RNCanvasContext,
 } from 'react-native-webgpu'
@@ -74,8 +75,7 @@ interface PipelineState {
   relightPipeline: GPURenderPipeline
   computeParamsBuffer: GPUBuffer
   relightParamsBuffer: GPUBuffer
-  disparityBuffer: GPUBuffer
-  depthPrepareBindGroup: GPUBindGroup
+  historyBuffer: GPUBuffer
   surfaceBindGroup: GPUBindGroup
   surfaceView: GPUTextureView
   depthW: number
@@ -204,10 +204,6 @@ function LightView() {
       size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
-    const disparityBuffer = device.createBuffer({
-      size: texelCount * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    })
     const historyBuffer = device.createBuffer({
       size: texelCount * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -219,14 +215,6 @@ function LightView() {
     })
     const surfaceView = surfaceTexture.createView()
 
-    const depthPrepareBindGroup = device.createBindGroup({
-      layout: depthPreparePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: computeParamsBuffer } },
-        { binding: 1, resource: { buffer: disparityBuffer } },
-        { binding: 2, resource: { buffer: historyBuffer } },
-      ],
-    })
     const surfaceBindGroup = device.createBindGroup({
       layout: surfacePipeline.getBindGroupLayout(0),
       entries: [
@@ -244,8 +232,7 @@ function LightView() {
       relightPipeline,
       computeParamsBuffer,
       relightParamsBuffer,
-      disparityBuffer,
-      depthPrepareBindGroup,
+      historyBuffer,
       surfaceBindGroup,
       surfaceView,
       depthW,
@@ -399,7 +386,9 @@ function LightView() {
             controlsNow.handControl,
           )
           let reset = 0
-          if (depth.seq >= 0 && depth.seq !== box.lastDepthSeq) {
+          let depthMemory: GPUSharedTextureMemory | null = null
+          let depthTexture: GPUTexture | null = null
+          if (depth.seq >= 0 && depth.seq !== box.lastDepthSeq && depth.surfacePointer !== 0n) {
             box.lastDepthSeq = depth.seq
             if (!box.rangeInitialized) {
               box.rangeInitialized = true
@@ -411,7 +400,6 @@ function LightView() {
               box.rangeLow = box.rangeLow + (depth.low - box.rangeLow) * 0.12
               box.rangeHigh = box.rangeHigh + (depth.high - box.rangeHigh) * 0.12
             }
-            device.queue.writeBuffer(pipeline.disparityBuffer, 0, depth.data)
             const computeParams = new ArrayBuffer(32)
             const cpU32 = new Uint32Array(computeParams)
             const cpF32 = new Float32Array(computeParams)
@@ -423,9 +411,28 @@ function LightView() {
             cpF32[5] = box.rangeHigh
             device.queue.writeBuffer(pipeline.computeParamsBuffer, 0, computeParams)
 
+            // Zero-copy: import CoreML's output IOSurface (r16float) as a
+            // texture - the depth map never leaves the GPU.
+            const memory = device.importSharedTextureMemory({
+              handle: depth.surfacePointer,
+              label: 'depth-f16',
+            })
+            const texture = memory.createTexture()
+            memory.beginAccess(texture, true)
+            depthMemory = memory
+            depthTexture = texture
+            const depthPrepareBindGroup = device.createBindGroup({
+              layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
+              entries: [
+                { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
+                { binding: 1, resource: texture.createView() },
+                { binding: 2, resource: { buffer: pipeline.historyBuffer } },
+              ],
+            })
+
             const compute = encoder.beginComputePass()
             compute.setPipeline(pipeline.depthPreparePipeline)
-            compute.setBindGroup(0, pipeline.depthPrepareBindGroup)
+            compute.setBindGroup(0, depthPrepareBindGroup)
             compute.dispatchWorkgroups(Math.ceil((pipeline.depthW * pipeline.depthH) / 64))
             compute.setPipeline(pipeline.surfacePipeline)
             compute.setBindGroup(0, pipeline.surfaceBindGroup)
@@ -514,26 +521,13 @@ function LightView() {
                   // and made it glitch - so sample small neighborhoods
                   // around thumb tip, index tip and midpoint and take the
                   // NEAREST disparity (the fingers are the nearest surface).
-                  const disparity = new Float32Array(depth.data)
-                  const w = pipeline.depthW
-                  const h = pipeline.depthH
-                  let nearest = Number.NEGATIVE_INFINITY
-                  const points = [
+                  // Native bounded probe - the depth map itself is GPU-only.
+                  const nearest = nitro.sampleDepthMax([
                     hand.thumbX, hand.thumbY,
                     hand.indexX, hand.indexY,
                     hand.midX, hand.midY,
-                  ]
-                  for (let p = 0; p < 6; p += 2) {
-                    const cx = Math.min(Math.max(Math.floor(points[p] * w), 2), w - 3)
-                    const cy = Math.min(Math.max(Math.floor(points[p + 1] * h), 2), h - 3)
-                    for (let t = 0; t < 5; t++) {
-                      const ox = t === 1 ? -2 : t === 2 ? 2 : 0
-                      const oy = t === 3 ? -2 : t === 4 ? 2 : 0
-                      const d = disparity[(cy + oy) * w + (cx + ox)]
-                      if (d === d && d > nearest) nearest = d
-                    }
-                  }
-                  if (nearest > Number.NEGATIVE_INFINITY) {
+                  ])
+                  if (nearest >= 0) {
                     const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
                     const normalized = Math.min(
                       Math.max((nearest - box.rangeLow) / span, 0),
@@ -670,6 +664,10 @@ function LightView() {
           device.queue.submit([encoder.finish()])
           pipeline.context.present()
           externalTexture.destroy()
+          if (depthMemory != null && depthTexture != null) {
+            depthMemory.endAccess(depthTexture)
+            depthTexture.destroy()
+          }
 
           // --- stats ---
           box.frameCount += 1

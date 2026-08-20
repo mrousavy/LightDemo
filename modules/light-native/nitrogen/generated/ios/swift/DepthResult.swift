@@ -18,8 +18,8 @@ public extension DepthResult {
   /**
    * Create a new instance of `DepthResult`.
    */
-  init(seq: Double, width: Double, height: Double, low: Double, high: Double, inferenceTimeMs: Double, prepTimeMs: Double, predictTimeMs: Double, data: ArrayBuffer) {
-    self.init(seq, width, height, low, high, inferenceTimeMs, prepTimeMs, predictTimeMs, data.getArrayBuffer())
+  init(seq: Double, width: Double, height: Double, low: Double, high: Double, inferenceTimeMs: Double, prepTimeMs: Double, predictTimeMs: Double, surfacePointer: UInt64) {
+    self.init(seq, width, height, low, high, inferenceTimeMs, prepTimeMs, predictTimeMs, surfacePointer)
   }
 
   @inline(__always)
@@ -63,7 +63,7 @@ public extension DepthResult {
   }
   
   @inline(__always)
-  var data: ArrayBuffer {
-    return ArrayBuffer(self.__data)
+  var surfacePointer: UInt64 {
+    return self.__surfacePointer
   }
 }

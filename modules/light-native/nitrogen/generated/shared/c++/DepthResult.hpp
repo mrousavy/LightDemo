@@ -30,7 +30,7 @@
 
 
 
-#include <NitroModules/ArrayBuffer.hpp>
+
 
 namespace margelo::nitro::lightnative {
 
@@ -47,11 +47,11 @@ namespace margelo::nitro::lightnative {
     double inferenceTimeMs     SWIFT_PRIVATE;
     double prepTimeMs     SWIFT_PRIVATE;
     double predictTimeMs     SWIFT_PRIVATE;
-    std::shared_ptr<ArrayBuffer> data     SWIFT_PRIVATE;
+    uint64_t surfacePointer     SWIFT_PRIVATE;
 
   public:
     DepthResult() = default;
-    explicit DepthResult(double seq, double width, double height, double low, double high, double inferenceTimeMs, double prepTimeMs, double predictTimeMs, std::shared_ptr<ArrayBuffer> data): seq(seq), width(width), height(height), low(low), high(high), inferenceTimeMs(inferenceTimeMs), prepTimeMs(prepTimeMs), predictTimeMs(predictTimeMs), data(data) {}
+    explicit DepthResult(double seq, double width, double height, double low, double high, double inferenceTimeMs, double prepTimeMs, double predictTimeMs, uint64_t surfacePointer): seq(seq), width(width), height(height), low(low), high(high), inferenceTimeMs(inferenceTimeMs), prepTimeMs(prepTimeMs), predictTimeMs(predictTimeMs), surfacePointer(surfacePointer) {}
 
   public:
     friend bool operator==(const DepthResult& lhs, const DepthResult& rhs) = default;
@@ -75,7 +75,7 @@ namespace margelo::nitro {
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "inferenceTimeMs"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "prepTimeMs"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "predictTimeMs"))),
-        JSIConverter<std::shared_ptr<ArrayBuffer>>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "data")))
+        JSIConverter<uint64_t>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "surfacePointer")))
       );
     }
     static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::lightnative::DepthResult& arg) {
@@ -88,7 +88,7 @@ namespace margelo::nitro {
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "inferenceTimeMs"), JSIConverter<double>::toJSI(runtime, arg.inferenceTimeMs));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "prepTimeMs"), JSIConverter<double>::toJSI(runtime, arg.prepTimeMs));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "predictTimeMs"), JSIConverter<double>::toJSI(runtime, arg.predictTimeMs));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "data"), JSIConverter<std::shared_ptr<ArrayBuffer>>::toJSI(runtime, arg.data));
+      obj.setProperty(runtime, PropNameIDCache::get(runtime, "surfacePointer"), JSIConverter<uint64_t>::toJSI(runtime, arg.surfacePointer));
       return obj;
     }
     static inline bool canConvert(jsi::Runtime& runtime, const jsi::Value& value) {
@@ -107,7 +107,7 @@ namespace margelo::nitro {
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "inferenceTimeMs")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "prepTimeMs")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "predictTimeMs")))) return false;
-      if (!JSIConverter<std::shared_ptr<ArrayBuffer>>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "data")))) return false;
+      if (!JSIConverter<uint64_t>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "surfacePointer")))) return false;
       return true;
     }
   };

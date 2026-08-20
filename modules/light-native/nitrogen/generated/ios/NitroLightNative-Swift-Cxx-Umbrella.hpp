@@ -34,6 +34,7 @@ namespace margelo::nitro::lightnative { struct LightStatus; }
 #include <exception>
 #include <memory>
 #include <string>
+#include <vector>
 
 // C++ helpers for Swift
 #include "NitroLightNative-Swift-Cxx-Bridge.hpp"

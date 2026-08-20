@@ -40,6 +40,7 @@ namespace NitroLightNative { class HybridLightPipelineSpec_cxx; }
 #include <exception>
 #include <functional>
 #include <memory>
+#include <vector>
 
 /**
  * Contains specialized versions of C++ templated types so they can be accessed from Swift,
@@ -188,6 +189,17 @@ namespace margelo::nitro::lightnative::bridge::swift {
     return Result<bool>::withError(error);
   }
   
+  // pragma MARK: std::vector<double>
+  /**
+   * Specialized version of `std::vector<double>`.
+   */
+  using std__vector_double_ = std::vector<double>;
+  inline std::vector<double> create_std__vector_double_(size_t size) noexcept {
+    std::vector<double> vector;
+    vector.reserve(size);
+    return vector;
+  }
+  
   // pragma MARK: Result<DepthResult>
   using Result_DepthResult_ = Result<DepthResult>;
   inline Result_DepthResult_ create_Result_DepthResult_(const DepthResult& value) noexcept {
@@ -204,6 +216,15 @@ namespace margelo::nitro::lightnative::bridge::swift {
   }
   inline Result_HandResult_ create_Result_HandResult_(const std::exception_ptr& error) noexcept {
     return Result<HandResult>::withError(error);
+  }
+  
+  // pragma MARK: Result<double>
+  using Result_double_ = Result<double>;
+  inline Result_double_ create_Result_double_(double value) noexcept {
+    return Result<double>::withValue(std::move(value));
+  }
+  inline Result_double_ create_Result_double_(const std::exception_ptr& error) noexcept {
+    return Result<double>::withError(error);
   }
   
   // pragma MARK: Result<void>

@@ -24,6 +24,7 @@ namespace margelo::nitro::lightnative { struct LightStatus; }
 
 #include "DepthResult.hpp"
 #include "HandResult.hpp"
+#include <vector>
 #include "LightControls.hpp"
 #include "LightStatus.hpp"
 
@@ -63,6 +64,7 @@ namespace margelo::nitro::lightnative {
       virtual DepthResult analyzeSync(uint64_t pointer, double orientationDegrees, bool runHands) = 0;
       virtual DepthResult getDepthResult() = 0;
       virtual HandResult getHandResult() = 0;
+      virtual double sampleDepthMax(const std::vector<double>& points) = 0;
       virtual void setControls(const LightControls& controls) = 0;
       virtual LightControls getControls() = 0;
       virtual void setStatus(const LightStatus& status) = 0;

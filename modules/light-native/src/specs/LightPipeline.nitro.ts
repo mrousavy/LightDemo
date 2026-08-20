@@ -63,6 +63,14 @@ export interface LightPipeline
   getHandResult(): HandResult
 
   /**
+   * Max disparity over small neighborhoods around the given crop-space
+   * points (flat `[x0, y0, x1, y1, ...]`, normalized 0-1), read from the
+   * latest depth map. A bounded ~tens-of-texels probe for placing the light
+   * at the fingertips' depth. Returns -1 when no depth is available.
+   */
+  sampleDepthMax(points: number[]): number
+
+  /**
    * Cross-runtime parameter store: the React runtime writes UI parameters,
    * the frame-processor worklet reads them each frame. Thread-safe.
    */

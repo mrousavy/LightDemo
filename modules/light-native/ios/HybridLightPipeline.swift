@@ -35,10 +35,11 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   }()
   private let sequenceHandler = VNSequenceRequestHandler()
 
-  // Ping-pong Float32 depth buffers. `frontIndex` is the completed one.
+  // The latest CoreML output pixel buffer (single-channel f16, IOSurface-
+  // backed). Retained so JS can zero-copy import its IOSurface into WebGPU;
+  // replaced (and the previous one released) on the next inference.
   private let lock = NSLock()
-  private var buffers: [UnsafeMutablePointer<Float>]
-  private var frontIndex = 0
+  private var latestOutput: CVPixelBuffer?
   private var depthSeq: Int = -1
   private var depthLow: Float = 0
   private var depthHigh: Float = 1
@@ -74,13 +75,6 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     self.modelInputName = inputName
     self.modelWidth = inputWidth
     self.modelHeight = inputHeight
-    let count = inputWidth * inputHeight
-    self.buffers = [
-      UnsafeMutablePointer<Float>.allocate(capacity: count),
-      UnsafeMutablePointer<Float>.allocate(capacity: count),
-    ]
-    self.buffers[0].initialize(repeating: 0, count: count)
-    self.buffers[1].initialize(repeating: 0, count: count)
     self.latestHand = HandResult(
       seq: -1, tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
       midX: 0, midY: 0, pinchRatio: 1, confidence: 0, detectionTimeMs: 0)
@@ -96,13 +90,9 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       handTracked: false, pinchRatio: 1, grabbed: false, depthSeq: -1, handSeq: -1)
   }
 
-  deinit {
-    buffers[0].deallocate()
-    buffers[1].deallocate()
-  }
-
   var memorySize: Int {
-    return modelWidth * modelHeight * 4 * 2
+    // input BGRA + output f16 pixel buffers
+    return modelWidth * modelHeight * (4 + 2)
   }
 
   func analyzeSync(
@@ -223,44 +213,18 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       print("[LightPipeline] depth: unexpected output size \(outWidth)x\(outHeight)")
       return
     }
-
-    lock.lock()
-    let backIndex = 1 - frontIndex
-    lock.unlock()
-    let target = buffers[backIndex]
-
-    CVPixelBufferLockBaseAddress(output, .readOnly)
-    defer { CVPixelBufferUnlockBaseAddress(output, .readOnly) }
-    guard let base = CVPixelBufferGetBaseAddress(output) else { return }
-    let bytesPerRow = CVPixelBufferGetBytesPerRow(output)
-    let format = CVPixelBufferGetPixelFormatType(output)
-
-    switch format {
-    case kCVPixelFormatType_OneComponent16Half, kCVPixelFormatType_DepthFloat16:
-      var src = vImage_Buffer(
-        data: UnsafeMutableRawPointer(mutating: base),
-        height: vImagePixelCount(outHeight), width: vImagePixelCount(outWidth),
-        rowBytes: bytesPerRow)
-      var dst = vImage_Buffer(
-        data: UnsafeMutableRawPointer(target),
-        height: vImagePixelCount(outHeight), width: vImagePixelCount(outWidth),
-        rowBytes: outWidth * MemoryLayout<Float>.stride)
-      vImageConvert_Planar16FtoPlanarF(&src, &dst, 0)
-    case kCVPixelFormatType_OneComponent32Float, kCVPixelFormatType_DepthFloat32:
-      for y in 0..<outHeight {
-        let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float.self)
-        target.advanced(by: y * outWidth).update(from: row, count: outWidth)
-      }
-    default:
-      print("[LightPipeline] depth: unsupported output format \(format)")
+    guard CVPixelBufferGetIOSurface(output) != nil else {
+      print("[LightPipeline] depth: output is not IOSurface-backed")
       return
     }
 
-    let (low, high) = Self.robustRange(of: target, count: outWidth * outHeight)
+    // Range from a sparse 32x32 grid probe (two scalars out; the full-frame
+    // pixel path stays on the GPU - JS imports the IOSurface directly).
+    let (low, high) = Self.sparseRobustRange(of: output)
     let elapsed = (CACurrentMediaTime() - start) * 1000
 
     lock.lock()
-    frontIndex = backIndex
+    latestOutput = output
     depthSeq += 1
     depthLow = low
     depthHigh = high
@@ -270,71 +234,94 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     lock.unlock()
   }
 
-  /// 2nd/98th percentile of `values` via a 256-bin histogram (the same robust
-  /// normalization the TypeGPU demo computes on the GPU).
-  private static func robustRange(of values: UnsafeMutablePointer<Float>, count: Int)
-    -> (Float, Float) {
-    var minV: Float = 0
-    var maxV: Float = 0
-    vDSP_minv(values, 1, &minV, vDSP_Length(count))
-    vDSP_maxv(values, 1, &maxV, vDSP_Length(count))
-    guard minV.isFinite, maxV.isFinite, maxV > minV else { return (0, 1) }
-    let span = maxV - minV
-    var histogram = [Int](repeating: 0, count: 256)
-    let scale = 255.0 / span
-    for i in 0..<count {
-      let v = values[i]
-      if v.isFinite {
-        let bin = Int((v - minV) * scale)
-        histogram[min(max(bin, 0), 255)] += 1
+  /// 2nd/98th percentile of the f16 depth map, estimated from a sparse 32x32
+  /// sample grid (1024 texels) - statistically equivalent for the smooth
+  /// depth fields this model produces, without a full-frame CPU read.
+  private static func sparseRobustRange(of buffer: CVPixelBuffer) -> (Float, Float) {
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { return (0, 1) }
+    let width = CVPixelBufferGetWidth(buffer)
+    let height = CVPixelBufferGetHeight(buffer)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+
+    let grid = 32
+    var samples = [Float]()
+    samples.reserveCapacity(grid * grid)
+    for gy in 0..<grid {
+      let y = (gy * height) / grid + height / (grid * 2)
+      let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float16.self)
+      for gx in 0..<grid {
+        let x = (gx * width) / grid + width / (grid * 2)
+        let value = Float(row[x])
+        if value.isFinite {
+          samples.append(value)
+        }
       }
     }
-    let total = histogram.reduce(0, +)
-    guard total > 0 else { return (0, 1) }
-    let lowTarget = max(1, Int(Double(total) * 0.02))
-    let highTarget = Int(Double(total) * 0.98)
-    var cumulative = 0
-    var lowBin = 0
-    var highBin = 255
-    var lowFound = false
-    for bin in 0..<256 {
-      cumulative += histogram[bin]
-      if !lowFound, cumulative >= lowTarget {
-        lowBin = bin
-        lowFound = true
-      }
-      if cumulative >= highTarget {
-        highBin = bin
-        break
-      }
-    }
-    let low = minV + (Float(lowBin) / 256.0) * span
-    var high = minV + (Float(highBin + 1) / 256.0) * span
+    guard samples.count > 8 else { return (0, 1) }
+    samples.sort()
+    let low = samples[max(Int(Double(samples.count) * 0.02), 0)]
+    var high = samples[min(Int(Double(samples.count) * 0.98), samples.count - 1)]
     high = max(high, low + 0.001)
     return (low, high)
+  }
+
+  func sampleDepthMax(points: [Double]) throws -> Double {
+    lock.lock()
+    let output = latestOutput
+    lock.unlock()
+    guard let buffer = output else { return -1 }
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { return -1 }
+    let width = CVPixelBufferGetWidth(buffer)
+    let height = CVPixelBufferGetHeight(buffer)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+
+    var nearest = -Float.greatestFiniteMagnitude
+    var found = false
+    let offsets = [(0, 0), (-2, 0), (2, 0), (0, -2), (0, 2)]
+    var i = 0
+    while i + 1 < points.count {
+      let cx = min(max(Int(points[i] * Double(width)), 2), width - 3)
+      let cy = min(max(Int(points[i + 1] * Double(height)), 2), height - 3)
+      for (ox, oy) in offsets {
+        let row = base.advanced(by: (cy + oy) * bytesPerRow)
+          .assumingMemoryBound(to: Float16.self)
+        let value = Float(row[cx + ox])
+        if value.isFinite, value > nearest {
+          nearest = value
+          found = true
+        }
+      }
+      i += 2
+    }
+    return found ? Double(nearest) : -1
   }
 
   func getDepthResult() throws -> DepthResult {
     lock.lock()
     let seq = depthSeq
-    let index = frontIndex
     let low = depthLow
     let high = depthHigh
     let time = depthTimeMs
     let prep = depthPrepMs
     let predict = depthPredictMs
+    let output = latestOutput
     lock.unlock()
-    let count = modelWidth * modelHeight
-    let pointer = buffers[index]
-    // Zero-copy view; keep `self` alive while JS holds the buffer.
-    let buffer = ArrayBuffer.wrap(
-      dataWithoutCopy: UnsafeMutableRawPointer(pointer),
-      size: count * MemoryLayout<Float>.stride,
-      onDelete: { _ = self })
+    // The IOSurface pointer stays valid as long as `latestOutput` is
+    // retained, i.e. until the next inference replaces it - consumers must
+    // import it within the same frame.
+    var surfacePointer: UInt64 = 0
+    if let output, let surface = CVPixelBufferGetIOSurface(output) {
+      surfacePointer = UInt64(UInt(bitPattern: Unmanaged.passUnretained(
+        surface.takeUnretainedValue()).toOpaque()))
+    }
     return DepthResult(
       seq: Double(seq), width: Double(modelWidth), height: Double(modelHeight),
       low: Double(low), high: Double(high), inferenceTimeMs: time,
-      prepTimeMs: prep, predictTimeMs: predict, data: buffer)
+      prepTimeMs: prep, predictTimeMs: predict, surfacePointer: surfacePointer)
   }
 
   // MARK: - Hands

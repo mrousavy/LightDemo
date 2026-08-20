@@ -180,6 +180,18 @@ open class HybridLightPipelineSpec_cxx {
   }
   
   @inline(__always)
+  public final func sampleDepthMax(points: bridge.std__vector_double_) -> bridge.Result_double_ {
+    do {
+      let __result = try self.__implementation.sampleDepthMax(points: points.map({ __item in __item }))
+      let __resultCpp = __result
+      return bridge.create_Result_double_(__resultCpp)
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_double_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
   public final func setControls(controls: LightControls) -> bridge.Result_void_ {
     do {
       try self.__implementation.setControls(controls: controls)

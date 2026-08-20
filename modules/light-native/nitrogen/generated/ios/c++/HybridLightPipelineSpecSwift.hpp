@@ -14,8 +14,6 @@ namespace NitroLightNative { class HybridLightPipelineSpec_cxx; }
 
 // Forward declaration of `DepthResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct DepthResult; }
-// Forward declaration of `ArrayBufferHolder` to properly resolve imports.
-namespace NitroModules { class ArrayBufferHolder; }
 // Forward declaration of `HandResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct HandResult; }
 // Forward declaration of `LightControls` to properly resolve imports.
@@ -24,9 +22,8 @@ namespace margelo::nitro::lightnative { struct LightControls; }
 namespace margelo::nitro::lightnative { struct LightStatus; }
 
 #include "DepthResult.hpp"
-#include <NitroModules/ArrayBuffer.hpp>
-#include <NitroModules/ArrayBufferHolder.hpp>
 #include "HandResult.hpp"
+#include <vector>
 #include "LightControls.hpp"
 #include <string>
 #include "LightStatus.hpp"
@@ -107,6 +104,14 @@ namespace margelo::nitro::lightnative {
     }
     inline HandResult getHandResult() override {
       auto __result = _swiftPart.getHandResult();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
+    inline double sampleDepthMax(const std::vector<double>& points) override {
+      auto __result = _swiftPart.sampleDepthMax(points);
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

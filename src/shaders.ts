@@ -81,22 +81,25 @@ struct ComputeParams {
 `;
 
 // Pass A: normalize disparity by the stabilized range + motion-adaptive
-// temporal EMA into the persistent history buffer.
+// temporal EMA into the persistent history buffer. The disparity texture is
+// CoreML's output IOSurface imported directly into WebGPU (r16float) -
+// the depth map never touches the CPU.
 export const DEPTH_PREPARE_SHADER = /* wgsl */ `
 ${CONSTANTS}
 ${COMPUTE_PARAMS}
 
 @group(0) @binding(0) var<uniform> params: ComputeParams;
-@group(0) @binding(1) var<storage, read> disparity: array<f32>;
+@group(0) @binding(1) var disparityTex: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> history: array<f32>;
 
 @compute @workgroup_size(64)
 fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
   let index = gid.x;
   if (index >= params.size.x * params.size.y) { return; }
+  let coord = vec2i(i32(index % params.size.x), i32(index / params.size.x));
   let low = params.range.x;
   let span = max(params.range.y - low, 0.001);
-  let disp = disparity[index];
+  let disp = textureLoad(disparityTex, coord, 0).r;
   var normalized = 0.0;
   if (disp == disp) { normalized = saturate((disp - low) / span); }
   var filtered = normalized;

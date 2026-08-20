@@ -20,6 +20,7 @@ namespace margelo::nitro::lightnative {
       prototype.registerHybridMethod("analyzeSync", &HybridLightPipelineSpec::analyzeSync);
       prototype.registerHybridMethod("getDepthResult", &HybridLightPipelineSpec::getDepthResult);
       prototype.registerHybridMethod("getHandResult", &HybridLightPipelineSpec::getHandResult);
+      prototype.registerHybridMethod("sampleDepthMax", &HybridLightPipelineSpec::sampleDepthMax);
       prototype.registerHybridMethod("setControls", &HybridLightPipelineSpec::setControls);
       prototype.registerHybridMethod("getControls", &HybridLightPipelineSpec::getControls);
       prototype.registerHybridMethod("setStatus", &HybridLightPipelineSpec::setStatus);

@@ -1,11 +1,14 @@
+import type { UInt64 } from 'react-native-nitro-modules'
+
 /**
  * One completed monocular depth inference.
  *
- * {@linkcode data} is a zero-copy view into a native ping-pong buffer of
- * `width * height` Float32 values (row-major, y-down, in the coordinate
- * space of the model's center-cropped input). Larger values = closer
- * (relative inverse depth / disparity). The buffer stays valid until the
- * pipeline completes two more inferences, so consume (upload) it right away.
+ * The depth map itself never leaves the GPU: {@linkcode surfacePointer} is
+ * the `IOSurfaceRef` of CoreML's output pixel buffer (single-channel f16,
+ * row-major, y-down, crop space; larger = closer / relative disparity).
+ * Import it into WebGPU via `device.importSharedTextureMemory({ handle })`
+ * as an `r16float` texture. The surface stays valid until the next
+ * `analyzeSync` call replaces it - import and encode within the same frame.
  */
 export interface DepthResult {
   /** Monotonically increasing sequence number. -1 if no inference completed yet. */
@@ -14,9 +17,12 @@ export interface DepthResult {
   width: number
   /** Height of the depth map in pixels. */
   height: number
-  /** Robust lower bound of this frame's disparity values (2nd percentile). */
+  /**
+   * Robust disparity range of this frame (2nd/98th percentile), estimated
+   * from a sparse 1024-sample grid probe - a bounded statistical reduction,
+   * not a full-frame CPU read.
+   */
   low: number
-  /** Robust upper bound of this frame's disparity values (98th percentile). */
   high: number
   /** Inference wall time in milliseconds (for the HUD). */
   inferenceTimeMs: number
@@ -24,6 +30,6 @@ export interface DepthResult {
   prepTimeMs: number
   /** Pure CoreML prediction part of {@linkcode inferenceTimeMs}. */
   predictTimeMs: number
-  /** The raw Float32 disparity values. */
-  data: ArrayBuffer
+  /** IOSurfaceRef of the f16 depth map (see interface docs). */
+  surfacePointer: UInt64
 }
