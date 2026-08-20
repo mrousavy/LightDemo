@@ -73,7 +73,7 @@ const MODE_NAMES = ['Relit', 'Camera', 'Depth', 'Normals']
 // The Insta360's sensor is native 4:3 (up to 3840x2880); its 16:9 modes are
 // crops. 1280x960 uses the full sensor height - more vertical FOV for our
 // square center crop.
-const TARGET_RESOLUTION = { width: 1280, height: 960 }
+const TARGET_RESOLUTION = { width: 1920, height: 1440 }
 // The synchronous pipeline is model-paced at ~30fps; streaming the camera
 // at 60fps only burns ISP/memory bandwidth on frames we drop.
 const CAMERA_CONSTRAINTS = [{ fps: 30 }]
