@@ -277,6 +277,15 @@ fn ignDither(uv: vec2f) -> f32 {
   return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
+// The shadow march runs in the exaggerated shadowZ space (far -1.25 vs the
+// lighting space's -0.7). The light's z MUST be scaled into that same space:
+// comparing shadow-space surfaces against a raw lighting-space light places
+// a near-surface light INSIDE the scene's exaggerated relief, making faces
+// self-shadow to black when the bulb hovers right in front of them.
+fn shadowSpaceLightZ() -> f32 {
+  return params.lightZ * (SHADOW_FAR_Z / SURFACE_FAR_Z);
+}
+
 // origin/lightDirection are in aspect-corrected world space; texture
 // lookups convert back through uvFromWorld.
 fn shadowFactor(origin: vec3f, lightDirection: vec3f, reach: f32, jitter: f32) -> f32 {
@@ -296,7 +305,7 @@ fn shadowFactor(origin: vec3f, lightDirection: vec3f, reach: f32, jitter: f32) -
     let bias = SHADOW_BIAS + travel * (SHADOW_SLOPE_BIAS + risePerTravel);
     let thickness = SHADOW_THICKNESS * (1.0 + (travel / SHADOW_SPAN) * SHADOW_THICKNESS_GROWTH);
     if (difference > bias && difference < thickness) {
-      let behindLight = 1.0 - saturate((sampleZ - params.lightZ) / SHADOW_FRONT_FADE);
+      let behindLight = 1.0 - saturate((sampleZ - shadowSpaceLightZ()) / SHADOW_FRONT_FADE);
       occlusion += saturate((difference - bias) / SHADOW_SOFTNESS) * behindLight;
     }
   }
@@ -390,12 +399,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
   var shadow = 1.0;
   if (params.shadowAmount > 0.0) {
+    // March entirely in shadow space: origin AND light z both scaled.
     let shadowOrigin = vec3f(world, shadowZ(surface.w));
-    let shadowToLight = lightPosition - shadowOrigin;
+    let shadowLight = vec3f(lightPosition.xy, shadowSpaceLightZ());
+    let shadowToLight = shadowLight - shadowOrigin;
     let shadowDistance = max(length(shadowToLight), 0.0001);
     let reach = shadowDistance * (SHADOW_SPAN / max(length(shadowToLight.xy), SHADOW_SPAN));
     let traced = shadowFactor(shadowOrigin, shadowToLight / shadowDistance, reach, noise);
-    shadow = mix(1.0, traced, params.shadowAmount);
+    // Area-light physics: the bulb (radius 0.05) subtends a huge solid
+    // angle for surfaces right next to it, so shadows fade out near the
+    // light instead of blackening a face the bulb is hovering in front of.
+    let nearLightFade = saturate((dist - BULB_WORLD_RADIUS * 2.5) / 0.25);
+    shadow = mix(1.0, traced, params.shadowAmount * nearLightFade);
   }
   let occlusion = mix(1.0, surface.z, params.occlusionAmount);
 
