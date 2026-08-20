@@ -3,6 +3,7 @@
 //  LightDemo
 //
 
+import AVFoundation
 import CoreML
 import Foundation
 import ImageIO
@@ -102,6 +103,38 @@ final class HybridLightNative: HybridLightNativeSpec {
   }
 
   // MARK: - Debug utilities
+
+  func getCameraDiagnostics() throws -> String {
+    var lines: [String] = []
+    lines.append("centerStageControlMode: \(AVCaptureDevice.centerStageControlMode.rawValue)")
+    lines.append("centerStageEnabled(class): \(AVCaptureDevice.isCenterStageEnabled)")
+    var deviceTypes: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+    if #available(iOS 17.0, *) {
+      deviceTypes.append(contentsOf: [.external, .continuityCamera])
+    }
+    let discovery = AVCaptureDevice.DiscoverySession(
+      deviceTypes: deviceTypes, mediaType: .video, position: .unspecified)
+    for device in discovery.devices {
+      lines.append("device: \(device.localizedName) [\(device.deviceType.rawValue)]")
+      lines.append("  centerStageActive: \(device.isCenterStageActive)")
+      lines.append("  videoZoomFactor: \(device.videoZoomFactor)")
+      lines.append("  geometricDistortionCorrection: supported=\(device.isGeometricDistortionCorrectionSupported) enabled=\(device.isGeometricDistortionCorrectionEnabled)")
+      let active = device.activeFormat
+      for format in device.formats {
+        let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        let fps = format.videoSupportedFrameRateRanges
+          .map { "\(Int($0.minFrameRate))-\(Int($0.maxFrameRate))" }
+          .joined(separator: ",")
+        let marker = format == active ? " <== ACTIVE" : ""
+        lines.append(
+          "  format: \(dims.width)x\(dims.height) fov=\(format.videoFieldOfView) " +
+          "binned=\(format.isVideoBinned) fps=\(fps) " +
+          "centerStage=\(format.isCenterStageSupported) " +
+          "zoomMax=\(format.videoMaxZoomFactor)\(marker)")
+      }
+    }
+    return lines.joined(separator: "\n")
+  }
 
   func snapshotWindow(path: String) throws -> Promise<Bool> {
     // Relative paths resolve into the app's Documents directory (readable

@@ -166,6 +166,18 @@ open class HybridLightNativeSpec_cxx {
   }
   
   @inline(__always)
+  public final func getCameraDiagnostics() -> bridge.Result_std__string_ {
+    do {
+      let __result = try self.__implementation.getCameraDiagnostics()
+      let __resultCpp = std.string(__result)
+      return bridge.create_Result_std__string_(__resultCpp)
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_std__string_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
   public final func savePng(path: std.string, width: Double, height: Double, bytesPerRow: Double, bgra: Bool, data: ArrayBuffer) -> bridge.Result_bool_ {
     do {
       let __result = try self.__implementation.savePng(path: String(path), width: width, height: height, bytesPerRow: bytesPerRow, bgra: bgra, data: data)

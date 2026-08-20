@@ -19,6 +19,13 @@ export interface LightNative
   snapshotWindow(path: string): Promise<boolean>
 
   /**
+   * Debug: dump the state of all external/continuity capture devices -
+   * formats with dimensions + field of view, the active format, zoom
+   * factor, and Center Stage state. For diagnosing FOV/zoom issues.
+   */
+  getCameraDiagnostics(): string
+
+  /**
    * Debug: write raw pixels to a PNG at {@linkcode path}.
    * {@linkcode bgra} selects BGRA byte order (WebGPU bgra8unorm readbacks),
    * otherwise RGBA is assumed.

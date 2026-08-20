@@ -41,9 +41,10 @@ const LIGHT_Z_MAX = 1.65
 
 const DEFAULT_CONTROLS: LightControls = {
   mirror: true,
-  // 270 = visually verified for the Insta360 Link 2 Pro's current mounting.
-  // Cycle the Rot button to "auto" for face-roll-based auto-calibration.
-  rotationOverride: 270,
+  // Auto: face-roll-based calibration (sign validated live). With a
+  // landscape connection the buffer should be upright (rotation 0), and
+  // auto adapts if the gimbal ever changes orientation.
+  rotationOverride: -1,
   mode: 0,
   // Moodier than the TypeGPU defaults (intensity 3.0 / exposure 0.5): a dim
   // base scene with a bright light reads far more dramatic on a well-lit
@@ -66,6 +67,16 @@ const DEFAULT_CONTROLS: LightControls = {
 }
 
 const MODE_NAMES = ['Relit', 'Camera', 'Depth', 'Normals']
+
+// Stable identities - inline literals would recreate the frame output /
+// reconfigure the session on every React render.
+// The Insta360's sensor is native 4:3 (up to 3840x2880); its 16:9 modes are
+// crops. 1280x960 uses the full sensor height - more vertical FOV for our
+// square center crop.
+const TARGET_RESOLUTION = { width: 1280, height: 960 }
+// The synchronous pipeline is model-paced at ~30fps; streaming the camera
+// at 60fps only burns ISP/memory bandwidth on frames we drop.
+const CAMERA_CONSTRAINTS = [{ fps: 30 }]
 
 interface PipelineState {
   context: RNCanvasContext
@@ -245,9 +256,10 @@ function LightView() {
     nitro?.setControls(controls)
   }, [nitro, controls])
 
-  // Debug handle for the CDP console (scripts/jsconsole.mjs).
+  // Debug handles for the CDP console (scripts/jsconsole.mjs).
   useEffect(() => {
     ;(globalThis as Record<string, unknown>).__nitro = nitro
+    ;(globalThis as Record<string, unknown>).__nitroFactory = LightNativeModule
   }, [nitro])
 
   // 5. Poll status for the HUD
@@ -751,6 +763,7 @@ function LightView() {
 
   const frameOutput = useFrameOutput({
     pixelFormat: 'yuv',
+    targetResolution: TARGET_RESOLUTION,
     onFrame: onFrame,
     onFrameDropped: onFrameDropped,
   })
@@ -759,9 +772,7 @@ function LightView() {
     isActive: pipeline != null && nitro != null && cameraDevice != null,
     device: cameraDevice as NonNullable<typeof cameraDevice>,
     outputs: [frameOutput],
-    // The synchronous pipeline is model-paced at ~30fps; streaming the
-    // camera at 60fps only burns ISP/memory bandwidth on frames we drop.
-    constraints: [{ fps: 30 }],
+    constraints: CAMERA_CONSTRAINTS,
     // Pin the output orientation to the sensor's native orientation so
     // Frames always arrive tagged 'up' - camera, depth and hand coordinates
     // then all share the same (landscape) space with no rotation anywhere.
@@ -775,7 +786,13 @@ function LightView() {
     onConfigured: () => console.log('[LightDemo] camera configured'),
   })
   useEffect(() => {
-    frameOutput.outputOrientation = 'up'
+    // 'right' maps to AVCaptureVideoOrientation.landscapeLeft. This must be
+    // a LANDSCAPE orientation: VisionCamera maps 'up' to .portrait, and
+    // orientation-capable external cameras (the Insta360 gimbal) physically
+    // rotate their sensor to match the connection's videoOrientation - a
+    // portrait connection cost us 90deg-rotated buffers AND a narrow
+    // portrait crop of the scene (compare FaceTime's wide landscape view).
+    frameOutput.outputOrientation = 'right'
   }, [frameOutput])
 
   // Square-ish canvas matching the depth model aspect (4:3), centered.

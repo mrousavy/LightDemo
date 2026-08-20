@@ -15,6 +15,7 @@ public protocol HybridLightNativeSpec_protocol: HybridObject {
   // Methods
   func createPipeline() throws -> Promise<(any HybridLightPipelineSpec)>
   func snapshotWindow(path: String) throws -> Promise<Bool>
+  func getCameraDiagnostics() throws -> String
   func savePng(path: String, width: Double, height: Double, bytesPerRow: Double, bgra: Bool, data: ArrayBuffer) throws -> Bool
 }
 

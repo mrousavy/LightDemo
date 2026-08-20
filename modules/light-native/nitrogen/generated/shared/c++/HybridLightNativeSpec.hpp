@@ -55,6 +55,7 @@ namespace margelo::nitro::lightnative {
       // Methods
       virtual std::shared_ptr<Promise<std::shared_ptr<HybridLightPipelineSpec>>> createPipeline() = 0;
       virtual std::shared_ptr<Promise<bool>> snapshotWindow(const std::string& path) = 0;
+      virtual std::string getCameraDiagnostics() = 0;
       virtual bool savePng(const std::string& path, double width, double height, double bytesPerRow, bool bgra, const std::shared_ptr<ArrayBuffer>& data) = 0;
 
     protected:

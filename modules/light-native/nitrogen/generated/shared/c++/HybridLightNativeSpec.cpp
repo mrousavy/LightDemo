@@ -16,6 +16,7 @@ namespace margelo::nitro::lightnative {
     registerHybrids(this, [](Prototype& prototype) {
       prototype.registerHybridMethod("createPipeline", &HybridLightNativeSpec::createPipeline);
       prototype.registerHybridMethod("snapshotWindow", &HybridLightNativeSpec::snapshotWindow);
+      prototype.registerHybridMethod("getCameraDiagnostics", &HybridLightNativeSpec::getCameraDiagnostics);
       prototype.registerHybridMethod("savePng", &HybridLightNativeSpec::savePng);
     });
   }

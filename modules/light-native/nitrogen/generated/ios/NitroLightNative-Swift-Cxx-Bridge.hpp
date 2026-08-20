@@ -40,6 +40,7 @@ namespace NitroLightNative { class HybridLightPipelineSpec_cxx; }
 #include <exception>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 /**
@@ -178,6 +179,15 @@ namespace margelo::nitro::lightnative::bridge::swift {
   }
   inline Result_std__shared_ptr_Promise_bool___ create_Result_std__shared_ptr_Promise_bool___(const std::exception_ptr& error) noexcept {
     return Result<std::shared_ptr<Promise<bool>>>::withError(error);
+  }
+  
+  // pragma MARK: Result<std::string>
+  using Result_std__string_ = Result<std::string>;
+  inline Result_std__string_ create_Result_std__string_(const std::string& value) noexcept {
+    return Result<std::string>::withValue(value);
+  }
+  inline Result_std__string_ create_Result_std__string_(const std::exception_ptr& error) noexcept {
+    return Result<std::string>::withError(error);
   }
   
   // pragma MARK: Result<bool>

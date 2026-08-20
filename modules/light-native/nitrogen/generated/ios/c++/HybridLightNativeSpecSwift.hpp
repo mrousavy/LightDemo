@@ -90,6 +90,14 @@ namespace margelo::nitro::lightnative {
       auto __value = std::move(__result.value());
       return __value;
     }
+    inline std::string getCameraDiagnostics() override {
+      auto __result = _swiftPart.getCameraDiagnostics();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
     inline bool savePng(const std::string& path, double width, double height, double bytesPerRow, bool bgra, const std::shared_ptr<ArrayBuffer>& data) override {
       auto __result = _swiftPart.savePng(path, std::forward<decltype(width)>(width), std::forward<decltype(height)>(height), std::forward<decltype(bytesPerRow)>(bytesPerRow), std::forward<decltype(bgra)>(bgra), ArrayBufferHolder(data));
       if (__result.hasError()) [[unlikely]] {
