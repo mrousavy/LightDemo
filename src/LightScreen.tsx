@@ -42,6 +42,10 @@ const REQUIRED_FEATURES: GPUFeatureName[] = [
 const Z_FAR = 1.1
 const LIGHT_Z_MIN = -Z_FAR
 const LIGHT_Z_MAX = 0.6
+// The light rides this far IN FRONT of the depth-map plane sampled at the
+// controlling fingertips - in front of the hand by construction. Also
+// larger than BULB_WORLD_RADIUS (0.05) so the sphere front never clips.
+const Z_MARGIN = 0.1
 
 const DEFAULT_CONTROLS: LightControls = {
   mirror: true,
@@ -397,9 +401,6 @@ function LightView() {
       velX: 0,
       velY: 0,
       lostFrames: 0,
-      handSizeSmoothed: 0,
-      grabRefSize: 0,
-      zSceneEnvelope: -Z_FAR,
       // Cached zero-copy depth import, keyed by the IOSurface pointer. With
       // CoreML output backings the pointer is stable, so the import and
       // bind group happen once and only the access window is per-frame.
@@ -583,10 +584,6 @@ function LightView() {
                     box.handY = target.y
                     box.handValid = true
                     box.outlierCount = 0
-                    // Re-reference the proximity control at each grab: z
-                    // moves relative to the hand's size at THIS grab.
-                    box.grabRefSize = 0
-                    box.zSceneEnvelope = -Z_FAR
                   }
                 } else {
                   box.pinchFrames = 0
@@ -620,7 +617,7 @@ function LightView() {
                         Math.max((hoverNearest - box.rangeLow) / span, 0),
                         1,
                       )
-                      const hoverZ = (hoverNorm - 1) * Z_FAR + 0.04
+                      const hoverZ = (hoverNorm - 1) * Z_FAR + Z_MARGIN
                       box.lightZ += (hoverZ - box.lightZ) * 0.08
                     }
                   }
@@ -680,28 +677,15 @@ function LightView() {
                   box.lightX += (box.handX - box.lightX) * 0.5
                   box.lightY += (box.handY - box.lightY) * 0.5
                   freshHandUpdate = true
-                  // Light depth = HYBRID of two signals, each doing what it
-                  // is actually good at:
-                  //
-                  // 1. SCENE-COHERENT BASE: the depth map sampled at the
-                  //    fingertips (nearest disparity over small tap
-                  //    neighborhoods) - the hand's z in the SAME normalized
-                  //    space the shading/occlusion uses, so the bulb sits in
-                  //    front of whatever the hand is in front of (e.g. your
-                  //    face). Run through an envelope follower (fast rise,
-                  //    slow decay): single mis-tracked taps hitting the
-                  //    background can no longer yank the light behind you
-                  //    for a frame, while genuinely moving away still lowers
-                  //    it within a few frames.
-                  //
-                  // 2. RELATIVE PROXIMITY: hand size (wrist->knuckle span,
-                  //    ~1/distance) measured against its size AT GRAB TIME.
-                  //    Relative depth cannot express the hand's own distance
-                  //    (the nearest object always normalizes the same), but
-                  //    the size RATIO since the grab can: closer than where
-                  //    you grabbed pushes the light out toward the viewer,
-                  //    farther pulls it deeper - intuitive at any seating
-                  //    distance, no calibration constants.
+                  // Light depth = the depth map itself: the fingertips'
+                  // disparity (nearest over small tap neighborhoods at
+                  // thumb, index and knuckle) mapped into the unified
+                  // z-space, plus a fixed forward margin - the bulb sits
+                  // just IN FRONT of the fingers by construction, in the
+                  // exact same space the shading, occlusion and shadow
+                  // march use. No hand-size heuristics, no envelope: where
+                  // the depth map says the fingers are is where the light
+                  // goes.
                   const nearest = nitro.sampleDepthMax([
                     locked.h.thumbX, locked.h.thumbY,
                     locked.h.indexX, locked.h.indexY,
@@ -713,31 +697,9 @@ function LightView() {
                       Math.max((nearest - box.rangeLow) / span, 0),
                       1,
                     )
-                    const zSample = (normalized - 1) * Z_FAR + 0.04
-                    box.zSceneEnvelope =
-                      zSample >= box.zSceneEnvelope
-                        ? zSample
-                        : Math.max(zSample, box.zSceneEnvelope - 0.02)
+                    const targetZ = (normalized - 1) * Z_FAR + Z_MARGIN
+                    box.lightZ += (targetZ - box.lightZ) * 0.35
                   }
-                  if (locked.h.handSize > 0) {
-                    box.handSizeSmoothed =
-                      box.handSizeSmoothed <= 0
-                        ? locked.h.handSize
-                        : box.handSizeSmoothed + (locked.h.handSize - box.handSizeSmoothed) * 0.3
-                    if (box.grabRefSize <= 0) box.grabRefSize = box.handSizeSmoothed
-                  }
-                  let sizeOffset = 0
-                  if (box.grabRefSize > 0 && box.handSizeSmoothed > 0) {
-                    // Lower clamp is shallow: the scene sample already
-                    // tracks a receding hand; a deep negative offset dug
-                    // the light through the back wall.
-                    sizeOffset = Math.min(
-                      Math.max((box.handSizeSmoothed / box.grabRefSize - 1) * 2.2, -0.2),
-                      1.2,
-                    )
-                  }
-                  const targetZ = box.zSceneEnvelope + sizeOffset
-                  box.lightZ += (targetZ - box.lightZ) * 0.25
                 }
               }
             } else {
