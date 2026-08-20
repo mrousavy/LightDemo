@@ -1,0 +1,13 @@
+diff --git a/ios/Extensions/Converters/AV+TargetVideoPixelFormat.swift b/ios/Extensions/Converters/AV+TargetVideoPixelFormat.swift
+index ab145afc8c10f9974aa2d1284bdbe658b7e03fda..e5940c02dd26c3589c1c1948f0c901baa6a45795 100644
+--- a/ios/Extensions/Converters/AV+TargetVideoPixelFormat.swift
++++ b/ios/Extensions/Converters/AV+TargetVideoPixelFormat.swift
+@@ -14,7 +14,7 @@ extension TargetVideoPixelFormat {
+     case .native:
+       return .native
+     case .yuv:
+-      return .specific(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
++      return .specific(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+     case .rgb:
+       return .specific(kCVPixelFormatType_32BGRA)
+     }

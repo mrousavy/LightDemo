@@ -38,6 +38,8 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
+  - NitroLightNative (0.1.0):
+    - NitroModules
   - NitroModules (0.37.0):
     - hermes-engine
     - RCTRequired
@@ -1878,6 +1880,7 @@ DEPENDENCIES:
   - glog (from `build/rndeps-facades/glog`)
   - hermes-engine (from `../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
   - NitroImage (from `../node_modules/react-native-nitro-image`)
+  - NitroLightNative (from `../node_modules/light-native`)
   - NitroModules (from `../node_modules/react-native-nitro-modules`)
   - RCT-Folly (from `build/rndeps-facades/RCT-Folly`)
   - RCTDeprecation (from `build/rncore-facades/RCTDeprecation`)
@@ -1982,6 +1985,8 @@ EXTERNAL SOURCES:
     :tag: hermes-v250829098.0.16
   NitroImage:
     :path: "../node_modules/react-native-nitro-image"
+  NitroLightNative:
+    :path: "../node_modules/light-native"
   NitroModules:
     :path: "../node_modules/react-native-nitro-modules"
   RCT-Folly:
@@ -2160,6 +2165,7 @@ SPEC CHECKSUMS:
   glog: 3cf7cb46f743c4bc758ae3e6d9c15bd1b4cfd6d4
   hermes-engine: 6a26e94b4a974cbadc751eed9caa12624c38f226
   NitroImage: c36a60d5febe30a6794978cd30c9e9f92392ff95
+  NitroLightNative: 83fcb44b327dfad4e7dad68109b0134f6b0ceed7
   NitroModules: b878677ec4c260bd821ed4a66703979538705f2e
   RCT-Folly: 82921e585c0400eda46fac1068297aa9dfb035e4
   RCTDeprecation: 6d66040b74f4be203495adda55b49c1a25190291

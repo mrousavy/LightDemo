@@ -1,0 +1,21 @@
+{
+  "name": "light-native",
+  "version": "0.1.0",
+  "description": "Local Nitro Module for LightDemo: CoreML monocular depth + Vision hand tracking",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "specs": "nitrogen --log-level info"
+  },
+  "peerDependencies": {
+    "react-native-nitro-modules": "*"
+  },
+  "peerDependenciesMeta": {
+    "react-native-nitro-modules": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "nitrogen": "0.37.0"
+  }
+}
