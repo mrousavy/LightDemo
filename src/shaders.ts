@@ -11,6 +11,11 @@
 //   pass mirrors the camera fetch with the same flag.
 
 const CONSTANTS = /* wgsl */ `
+// The lighting field (history + surface texture) runs at FIELD_SCALE x the
+// depth model resolution with bilinear depth upsampling: normals, AO and
+// shadows computed at raw model resolution look blocky against the sharp
+// camera image. Gradient/AO step radii stay in MODEL texel units.
+const FIELD_SCALE = 2;
 const TEMPORAL_ALPHA = 0.32;
 // Original demo uses 0.8; raised so fast-moving objects leave less of a
 // residual lighting trail (20% -> 8% of the previous depth under motion).
@@ -93,6 +98,7 @@ ${COMPUTE_PARAMS}
 @group(0) @binding(0) var<uniform> params: ComputeParams;
 @group(0) @binding(1) var disparityTex: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> history: array<f32>;
+@group(0) @binding(3) var disparitySampler: sampler;
 
 @compute @workgroup_size(64)
 fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
@@ -101,7 +107,9 @@ fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
   let coord = vec2i(i32(index % params.size.x), i32(index / params.size.x));
   let low = params.range.x;
   let span = max(params.range.y - low, 0.001);
-  let disp = textureLoad(disparityTex, coord, 0).r;
+  // params.size is the FIELD size; bilinearly upsample the model output.
+  let uv = (vec2f(coord) + 0.5) / vec2f(params.size);
+  let disp = textureSampleLevel(disparityTex, disparitySampler, uv, 0.0).r;
   var normalized = 0.0;
   if (disp == disp) { normalized = saturate((disp - low) / span); }
   var filtered = normalized;
@@ -149,18 +157,22 @@ fn surfacePass(@builtin(global_invocation_id) gid: vec3u) {
   let size = vec2i(params.size);
   let coord = vec2i(gid.xy);
   if (coord.x >= size.x || coord.y >= size.y) { return; }
+  // Step radii are in MODEL texel units (the constants were tuned for the
+  // ~448px demo field), so multiply by FIELD_SCALE for field texels but
+  // normalize the gradient by the model-texel distance.
+  let stepRadius = GRADIENT_RADIUS * FIELD_SCALE;
   let center = depthTexelAt(coord, size);
-  let left   = depthTexelAt(coord + vec2i(-GRADIENT_RADIUS, 0), size);
-  let right  = depthTexelAt(coord + vec2i( GRADIENT_RADIUS, 0), size);
-  let up     = depthTexelAt(coord + vec2i(0, -GRADIENT_RADIUS), size);
-  let down   = depthTexelAt(coord + vec2i(0,  GRADIENT_RADIUS), size);
+  let left   = depthTexelAt(coord + vec2i(-stepRadius, 0), size);
+  let right  = depthTexelAt(coord + vec2i( stepRadius, 0), size);
+  let up     = depthTexelAt(coord + vec2i(0, -stepRadius), size);
+  let down   = depthTexelAt(coord + vec2i(0,  stepRadius), size);
   var gradient = surfaceSlope(vec2f(
     gentlerDelta(center - left, right - center),
     gentlerDelta(center - up,  down  - center)) / f32(GRADIENT_RADIUS));
 
   var occlusion = 0.0;
   for (var r = 0; r < 2; r++) {
-    let radius = select(9, 3, r == 0);
+    let radius = select(9, 3, r == 0) * FIELD_SCALE;
     for (var sy = -1; sy <= 1; sy++) {
       for (var sx = -1; sx <= 1; sx++) {
         if (sx != 0 || sy != 0) {

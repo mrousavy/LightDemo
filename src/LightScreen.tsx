@@ -93,6 +93,9 @@ interface PipelineState {
   surfaceView: GPUTextureView
   depthW: number
   depthH: number
+  // Lighting-field resolution: FIELD_SCALE x the model output (see shaders).
+  fieldW: number
+  fieldH: number
 }
 
 export function LightScreen() {
@@ -187,7 +190,9 @@ function LightView() {
 
     const depthW = nitro.depthWidth
     const depthH = nitro.depthHeight
-    const texelCount = depthW * depthH
+    const fieldW = depthW * 2
+    const fieldH = depthH * 2
+    const fieldTexelCount = fieldW * fieldH
 
     const depthPrepareModule = device.createShaderModule({ code: DEPTH_PREPARE_SHADER })
     const surfaceModule = device.createShaderModule({ code: SURFACE_SHADER })
@@ -218,11 +223,11 @@ function LightView() {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const historyBuffer = device.createBuffer({
-      size: texelCount * 4,
+      size: fieldTexelCount * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     })
     const surfaceTexture = device.createTexture({
-      size: [depthW, depthH],
+      size: [fieldW, fieldH],
       format: 'rgba16float',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     })
@@ -250,6 +255,8 @@ function LightView() {
       surfaceView,
       depthW,
       depthH,
+      fieldW,
+      fieldH,
     })
   }, [device, nitro, pipeline, ref])
 
@@ -470,8 +477,8 @@ function LightView() {
             const computeParams = new ArrayBuffer(32)
             const cpU32 = new Uint32Array(computeParams)
             const cpF32 = new Float32Array(computeParams)
-            cpU32[0] = pipeline.depthW
-            cpU32[1] = pipeline.depthH
+            cpU32[0] = pipeline.fieldW
+            cpU32[1] = pipeline.fieldH
             cpU32[2] = reset
             cpU32[3] = mirrored ? 1 : 0
             cpF32[4] = box.rangeLow
@@ -497,6 +504,7 @@ function LightView() {
                   { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
                   { binding: 1, resource: texture.createView() },
                   { binding: 2, resource: { buffer: pipeline.historyBuffer } },
+                  { binding: 3, resource: pipeline.sampler },
                 ],
               })
             }
@@ -506,12 +514,12 @@ function LightView() {
             const compute = encoder.beginComputePass()
             compute.setPipeline(pipeline.depthPreparePipeline)
             compute.setBindGroup(0, box.depthBindGroup!)
-            compute.dispatchWorkgroups(Math.ceil((pipeline.depthW * pipeline.depthH) / 64))
+            compute.dispatchWorkgroups(Math.ceil((pipeline.fieldW * pipeline.fieldH) / 64))
             compute.setPipeline(pipeline.surfacePipeline)
             compute.setBindGroup(0, pipeline.surfaceBindGroup)
             compute.dispatchWorkgroups(
-              Math.ceil(pipeline.depthW / 8),
-              Math.ceil(pipeline.depthH / 8),
+              Math.ceil(pipeline.fieldW / 8),
+              Math.ceil(pipeline.fieldH / 8),
             )
             compute.end()
           }
