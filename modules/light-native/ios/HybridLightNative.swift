@@ -49,7 +49,9 @@ final class HybridLightNative: HybridLightNativeSpec {
         "DepthAnythingV2Small model not found in LightNativeModels bundle")
     }
     let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-    let cachedURL = caches.appendingPathComponent("DepthAnythingV2Small.mlmodelc")
+    // Cache key includes the input size so swapping the bundled model never
+    // resurrects a stale compiled cache.
+    let cachedURL = caches.appendingPathComponent("DepthAnythingV2Small-392x392.mlmodelc")
     if FileManager.default.fileExists(atPath: cachedURL.path) {
       return try MLModel(contentsOf: cachedURL, configuration: configuration)
     }

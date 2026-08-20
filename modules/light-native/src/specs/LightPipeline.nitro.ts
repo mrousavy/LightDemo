@@ -57,6 +57,15 @@ export interface LightPipeline
 
   /** Latest completed depth inference (seq -1 if none yet). */
   getDepthResult(): DepthResult
+
+  /**
+   * Run depth inference for this frame SYNCHRONOUSLY on the calling thread
+   * (~20-30ms on the ANE) and return the result. Rendering with the same
+   * frame's depth keeps camera pixels and lighting perfectly coherent - an
+   * asynchronously-lagging depth map paints glowing ghost trails behind
+   * fast-moving objects. Do not mix with `submitFrame(runDepth: true)`.
+   */
+  runDepthSync(pointer: UInt64, orientationDegrees: number): DepthResult
   /** Latest completed hand detection (seq -1 if none yet). */
   getHandResult(): HandResult
 

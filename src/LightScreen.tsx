@@ -44,12 +44,15 @@ const DEFAULT_CONTROLS: LightControls = {
   // Cycle the Rot button to "auto" for face-roll-based auto-calibration.
   rotationOverride: 270,
   mode: 0,
-  intensity: 3.0,
-  exposure: 0.5,
+  // Moodier than the TypeGPU defaults (intensity 3.0 / exposure 0.5): a dim
+  // base scene with a bright light reads far more dramatic on a well-lit
+  // webcam feed.
+  intensity: 4.5,
+  exposure: 0.22,
   relief: 0.85,
-  specular: 0.22,
-  shadow: 0.7,
-  occlusion: 0.55,
+  specular: 0.28,
+  shadow: 0.85,
+  occlusion: 0.7,
   colorR: 1.0,
   colorG: 0.83,
   colorB: 0.6,
@@ -363,9 +366,9 @@ function LightView() {
         // raw buffer tells us how the buffer is rotated (the VisionCamera
         // tag comes from the connection's default portrait videoOrientation
         // and is wrong for external/gimbal cameras). ROLL_SIGN converts
-        // Vision's y-up roll into our display-rotation direction (validated
-        // live; flip if a camera ever disagrees).
-        const ROLL_SIGN = -1
+        // Vision's y-up roll into our display-rotation direction. Validated
+        // live: roll=-90 measured while the verified rotation was 270.
+        const ROLL_SIGN = 1
         const quantized =
           ((Math.round((ROLL_SIGN * faceRoll) / 90) * 90) % 360 + 360) % 360
         rotationDeg = quantized as 0 | 90 | 180 | 270
@@ -374,8 +377,9 @@ function LightView() {
       else if (frame.orientation === 'left') rotationDeg = 270
       const nativeBuffer = frame.getNativeBuffer()
       try {
-        // Kick depth + hand analysis (async, drop-if-busy).
-        nitro.submitFrame(nativeBuffer.pointer, rotationDeg, true, controlsNow.handControl)
+        // Kick hand analysis (async, drop-if-busy). Depth runs synchronously
+        // below so lighting always matches this exact frame.
+        nitro.submitFrame(nativeBuffer.pointer, rotationDeg, false, controlsNow.handControl)
 
         const videoFrame = rnwgpu.createVideoFrameFromNativeBuffer(nativeBuffer.pointer)
         try {
@@ -389,8 +393,9 @@ function LightView() {
 
           const encoder = device.createCommandEncoder()
 
-          // --- depth passes (only when a new inference completed) ---
-          const depth = nitro.getDepthResult()
+          // --- depth: synchronous, same-frame (async depth lags the camera
+          // image and paints ghost trails behind fast-moving objects) ---
+          const depth = nitro.runDepthSync(nativeBuffer.pointer, rotationDeg)
           let reset = 0
           if (depth.seq >= 0 && depth.seq !== box.lastDepthSeq) {
             box.lastDepthSeq = depth.seq
@@ -718,10 +723,20 @@ function LightView() {
     [pipeline, device, nitro, box, rnwgpu],
   )
 
-  const onFrameDropped = useCallback((reason: string) => {
-    'worklet'
-    console.log(`[LightDemo] frame dropped: ${reason}`)
-  }, [])
+  // Synchronous depth makes the frame callback take ~1 model interval, so
+  // at 60fps camera every other frame is dropped by design - only log a
+  // periodic summary.
+  const dropBox = useMemo(() => ({ count: 0 }), [])
+  const onFrameDropped = useCallback(
+    (reason: string) => {
+      'worklet'
+      dropBox.count += 1
+      if (dropBox.count % 300 === 0) {
+        console.log(`[LightDemo] ${dropBox.count} frames dropped so far (${reason})`)
+      }
+    },
+    [dropBox],
+  )
 
   const frameOutput = useFrameOutput({
     pixelFormat: 'yuv',

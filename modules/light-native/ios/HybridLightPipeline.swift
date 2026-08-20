@@ -308,6 +308,19 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     return (low, high)
   }
 
+  func runDepthSync(pointer: UInt64, orientationDegrees: Double) throws -> DepthResult {
+    guard let raw = UnsafeRawPointer(bitPattern: UInt(pointer)) else {
+      throw RuntimeError.error(withMessage: "runDepthSync: pointer is null")
+    }
+    let pixelBuffer = Unmanaged<CVPixelBuffer>.fromOpaque(raw).takeUnretainedValue()
+    let orientation = Self.cgOrientation(fromDegrees: Int(orientationDegrees))
+    // Runs inline on the calling (frame-processor) thread. Must not be mixed
+    // with submitFrame(runDepth: true) - the preprocessing buffers are not
+    // designed for concurrent depth inferences.
+    runDepthInference(on: pixelBuffer, orientation: orientation)
+    return try getDepthResult()
+  }
+
   func getDepthResult() throws -> DepthResult {
     lock.lock()
     let seq = depthSeq

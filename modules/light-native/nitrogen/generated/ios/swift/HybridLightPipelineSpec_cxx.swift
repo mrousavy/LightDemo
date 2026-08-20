@@ -167,6 +167,18 @@ open class HybridLightPipelineSpec_cxx {
   }
   
   @inline(__always)
+  public final func runDepthSync(pointer: UInt64, orientationDegrees: Double) -> bridge.Result_DepthResult_ {
+    do {
+      let __result = try self.__implementation.runDepthSync(pointer: pointer, orientationDegrees: orientationDegrees)
+      let __resultCpp = __result
+      return bridge.create_Result_DepthResult_(__resultCpp)
+    } catch (let __error) {
+      let __exceptionPtr = __error.toCpp()
+      return bridge.create_Result_DepthResult_(__exceptionPtr)
+    }
+  }
+  
+  @inline(__always)
   public final func getHandResult() -> bridge.Result_HandResult_ {
     do {
       let __result = try self.__implementation.getHandResult()

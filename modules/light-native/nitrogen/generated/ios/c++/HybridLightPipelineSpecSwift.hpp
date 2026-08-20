@@ -103,6 +103,14 @@ namespace margelo::nitro::lightnative {
       auto __value = std::move(__result.value());
       return __value;
     }
+    inline DepthResult runDepthSync(uint64_t pointer, double orientationDegrees) override {
+      auto __result = _swiftPart.runDepthSync(std::forward<decltype(pointer)>(pointer), std::forward<decltype(orientationDegrees)>(orientationDegrees));
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+      auto __value = std::move(__result.value());
+      return __value;
+    }
     inline HandResult getHandResult() override {
       auto __result = _swiftPart.getHandResult();
       if (__result.hasError()) [[unlikely]] {
