@@ -144,20 +144,9 @@ open class HybridLightPipelineSpec_cxx {
 
   // Methods
   @inline(__always)
-  public final func submitFrame(pointer: UInt64, orientationDegrees: Double, runDepth: Bool, runHands: Bool) -> bridge.Result_void_ {
+  public final func analyzeSync(pointer: UInt64, orientationDegrees: Double, runHands: Bool) -> bridge.Result_DepthResult_ {
     do {
-      try self.__implementation.submitFrame(pointer: pointer, orientationDegrees: orientationDegrees, runDepth: runDepth, runHands: runHands)
-      return bridge.create_Result_void_()
-    } catch (let __error) {
-      let __exceptionPtr = __error.toCpp()
-      return bridge.create_Result_void_(__exceptionPtr)
-    }
-  }
-  
-  @inline(__always)
-  public final func getDepthResult() -> bridge.Result_DepthResult_ {
-    do {
-      let __result = try self.__implementation.getDepthResult()
+      let __result = try self.__implementation.analyzeSync(pointer: pointer, orientationDegrees: orientationDegrees, runHands: runHands)
       let __resultCpp = __result
       return bridge.create_Result_DepthResult_(__resultCpp)
     } catch (let __error) {
@@ -167,9 +156,9 @@ open class HybridLightPipelineSpec_cxx {
   }
   
   @inline(__always)
-  public final func runDepthSync(pointer: UInt64, orientationDegrees: Double) -> bridge.Result_DepthResult_ {
+  public final func getDepthResult() -> bridge.Result_DepthResult_ {
     do {
-      let __result = try self.__implementation.runDepthSync(pointer: pointer, orientationDegrees: orientationDegrees)
+      let __result = try self.__implementation.getDepthResult()
       let __resultCpp = __result
       return bridge.create_Result_DepthResult_(__resultCpp)
     } catch (let __error) {

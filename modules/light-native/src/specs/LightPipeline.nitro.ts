@@ -34,38 +34,31 @@ export interface LightPipeline
   readonly lastFaceRollDegrees: number
 
   /**
-   * Submit a camera frame (a `CVPixelBufferRef` pointer from
-   * VisionCamera's `frame.getNativeBuffer().pointer`, retained +1 by the
-   * caller) for analysis. The pipeline retains the buffer internally for as
-   * long as it needs it - the caller can `release()` its reference
-   * immediately after this returns.
+   * Analyze one camera frame FULLY SYNCHRONOUSLY on the calling thread:
+   * depth inference (~20-30ms on the ANE), and - when {@linkcode runHands} -
+   * hand-pose detection, both for THIS exact frame. Rendering with the same
+   * frame's results keeps camera pixels and lighting perfectly coherent (an
+   * asynchronously-lagging depth map paints glowing ghost trails behind
+   * fast-moving objects).
    *
-   * Frames submitted while a task is still busy are dropped for that task.
-   * Safe to call from the VisionCamera frame-processor worklet thread.
+   * Hand detection runs on the already-prepared (GPU crop/scaled, upright)
+   * depth-model input buffer, so its coordinates come back directly in the
+   * crop space shared with the depth map.
    *
-   * {@linkcode orientationDegrees} is the rotation needed to display the
-   * buffer upright (VisionCamera's `Frame.orientation`: up=0, right=90,
-   * down=180, left=270). Depth maps and hand coordinates are produced in
-   * the upright (display) space.
+   * {@linkcode pointer} is a `CVPixelBufferRef` from VisionCamera's
+   * `frame.getNativeBuffer().pointer` (retained +1 by the caller; the caller
+   * may `release()` right after this returns). {@linkcode orientationDegrees}
+   * is the rotation needed to display the buffer upright (up=0, right=90,
+   * down=180, left=270).
    */
-  submitFrame(
+  analyzeSync(
     pointer: UInt64,
     orientationDegrees: number,
-    runDepth: boolean,
     runHands: boolean
-  ): void
+  ): DepthResult
 
   /** Latest completed depth inference (seq -1 if none yet). */
   getDepthResult(): DepthResult
-
-  /**
-   * Run depth inference for this frame SYNCHRONOUSLY on the calling thread
-   * (~20-30ms on the ANE) and return the result. Rendering with the same
-   * frame's depth keeps camera pixels and lighting perfectly coherent - an
-   * asynchronously-lagging depth map paints glowing ghost trails behind
-   * fast-moving objects. Do not mix with `submitFrame(runDepth: true)`.
-   */
-  runDepthSync(pointer: UInt64, orientationDegrees: number): DepthResult
   /** Latest completed hand detection (seq -1 if none yet). */
   getHandResult(): HandResult
 

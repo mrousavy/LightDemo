@@ -60,9 +60,8 @@ namespace margelo::nitro::lightnative {
 
     public:
       // Methods
-      virtual void submitFrame(uint64_t pointer, double orientationDegrees, bool runDepth, bool runHands) = 0;
+      virtual DepthResult analyzeSync(uint64_t pointer, double orientationDegrees, bool runHands) = 0;
       virtual DepthResult getDepthResult() = 0;
-      virtual DepthResult runDepthSync(uint64_t pointer, double orientationDegrees) = 0;
       virtual HandResult getHandResult() = 0;
       virtual void setControls(const LightControls& controls) = 0;
       virtual LightControls getControls() = 0;

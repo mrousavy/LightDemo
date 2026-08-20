@@ -12,7 +12,8 @@ import NitroModules
 import Vision
 
 /// Frame analysis pipeline: CoreML monocular depth (ANE) + Vision hand pose.
-/// Both tasks run on their own serial queues with drop-if-busy semantics.
+/// Everything runs SYNCHRONOUSLY on the caller's (frame-processor) thread so
+/// results always correspond to the exact frame being rendered.
 final class HybridLightPipeline: HybridLightPipelineSpec {
   private let mlModel: MLModel
   private let modelInputName: String
@@ -25,10 +26,14 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private let ciContext = CIContext(options: [.cacheIntermediates: false])
   private var inputBuffer: CVPixelBuffer?
 
-  private let depthQueue = DispatchQueue(label: "light.depth", qos: .userInteractive)
-  private let handQueue = DispatchQueue(label: "light.hands", qos: .userInteractive)
-  private let depthBusy = NitroAtomicFlag()
-  private let handBusy = NitroAtomicFlag()
+  // Persistent Vision objects: VNSequenceRequestHandler caches state across
+  // video frames and avoids the per-frame handler setup cost.
+  private let handRequest: VNDetectHumanHandPoseRequest = {
+    let request = VNDetectHumanHandPoseRequest()
+    request.maximumHandCount = 1
+    return request
+  }()
+  private let sequenceHandler = VNSequenceRequestHandler()
 
   // Ping-pong Float32 depth buffers. `frontIndex` is the completed one.
   private let lock = NSLock()
@@ -100,35 +105,36 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     return modelWidth * modelHeight * 4 * 2
   }
 
-  func submitFrame(
-    pointer: UInt64, orientationDegrees: Double, runDepth: Bool, runHands: Bool
-  ) throws {
+  func analyzeSync(
+    pointer: UInt64, orientationDegrees: Double, runHands: Bool
+  ) throws -> DepthResult {
     guard let raw = UnsafeRawPointer(bitPattern: UInt(pointer)) else {
-      throw RuntimeError.error(withMessage: "submitFrame: pointer is null")
+      throw RuntimeError.error(withMessage: "analyzeSync: pointer is null")
     }
+    let pixelBuffer = Unmanaged<CVPixelBuffer>.fromOpaque(raw).takeUnretainedValue()
     let orientation = Self.cgOrientation(fromDegrees: Int(orientationDegrees))
 
-    if runDepth, !depthBusy.testAndSet() {
-      // Retain the buffer for the async task; released when done.
-      let retained = Unmanaged<CVPixelBuffer>.fromOpaque(raw).retain().takeUnretainedValue()
-      depthQueue.async { [weak self] in
-        defer {
-          Unmanaged.passUnretained(retained).release()
-          self?.depthBusy.clear()
-        }
-        self?.runDepthInference(on: retained, orientation: orientation)
-      }
+    runDepthInference(on: pixelBuffer, orientation: orientation)
+    if runHands, let input = inputBuffer {
+      // The prepared model input is already upright + center-cropped, so
+      // hand landmarks come back directly in the shared crop space - and
+      // Vision runs on 392x392 instead of the full camera frame.
+      detectHands(onPreparedInput: input)
     }
-    if runHands, !handBusy.testAndSet() {
-      let retained = Unmanaged<CVPixelBuffer>.fromOpaque(raw).retain().takeUnretainedValue()
-      handQueue.async { [weak self] in
-        defer {
-          Unmanaged.passUnretained(retained).release()
-          self?.handBusy.clear()
-        }
-        self?.runHandDetection(on: retained, orientation: orientation)
-      }
+
+    // Orientation auto-calibration: measure the face roll on the RAW buffer
+    // (the prepared input is already uprighted, so it is useless for this)
+    // every ~4s - gimbal cameras can physically rotate mid-session.
+    orientationScanCountdown -= 1
+    if orientationScanCountdown <= 0 {
+      scanOrientation(on: pixelBuffer)
+      lock.lock()
+      let seen = lastRollDeg > -900
+      lock.unlock()
+      orientationScanCountdown = seen ? 120 : 30
     }
+
+    return try getDepthResult()
   }
 
   /// Maps "degrees of rotation needed to display upright" to the EXIF-style
@@ -308,19 +314,6 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     return (low, high)
   }
 
-  func runDepthSync(pointer: UInt64, orientationDegrees: Double) throws -> DepthResult {
-    guard let raw = UnsafeRawPointer(bitPattern: UInt(pointer)) else {
-      throw RuntimeError.error(withMessage: "runDepthSync: pointer is null")
-    }
-    let pixelBuffer = Unmanaged<CVPixelBuffer>.fromOpaque(raw).takeUnretainedValue()
-    let orientation = Self.cgOrientation(fromDegrees: Int(orientationDegrees))
-    // Runs inline on the calling (frame-processor) thread. Must not be mixed
-    // with submitFrame(runDepth: true) - the preprocessing buffers are not
-    // designed for concurrent depth inferences.
-    runDepthInference(on: pixelBuffer, orientation: orientation)
-    return try getDepthResult()
-  }
-
   func getDepthResult() throws -> DepthResult {
     lock.lock()
     let seq = depthSeq
@@ -362,34 +355,10 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     lock.unlock()
   }
 
-  private func runHandDetection(
-    on pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation
-  ) {
-    // Piggyback the orientation auto-calibration on this queue: measure
-    // often until a face has been seen, then re-measure every ~3s (gimbal
-    // cameras can physically rotate mid-session).
-    orientationScanCountdown -= 1
-    if orientationScanCountdown <= 0 {
-      scanOrientation(on: pixelBuffer)
-      lock.lock()
-      let seen = lastRollDeg > -900
-      lock.unlock()
-      orientationScanCountdown = seen ? 120 : 30
-    }
-
+  /// Synchronous hand-pose detection on the prepared (upright, cropped)
+  /// model input buffer - landmarks come back directly in crop space.
+  private func detectHands(onPreparedInput input: CVPixelBuffer) {
     let start = CACurrentMediaTime()
-    let request = VNDetectHumanHandPoseRequest()
-    request.maximumHandCount = 1
-    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
-
-    // Vision reports landmarks in the ORIENTED (upright) image space, so the
-    // crop math uses upright dimensions (swapped for 90/270 rotations).
-    let rotated = orientation == .right || orientation == .left
-      || orientation == .rightMirrored || orientation == .leftMirrored
-    let bufferWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-    let bufferHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
-    let frameWidth = rotated ? bufferHeight : bufferWidth
-    let frameHeight = rotated ? bufferWidth : bufferHeight
 
     var detected: (
       thumb: (Double, Double), index: (Double, Double),
@@ -397,35 +366,20 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     )? = nil
 
     do {
-      try handler.perform([request])
+      try sequenceHandler.perform([handRequest], on: input)
     } catch {
       // fall through with detected == nil
     }
-    if let hand = request.results?.first,
+    if let hand = handRequest.results?.first,
        let thumb = try? hand.recognizedPoint(.thumbTip),
        let index = try? hand.recognizedPoint(.indexTip),
        let wrist = try? hand.recognizedPoint(.wrist),
        let middleMCP = try? hand.recognizedPoint(.middleMCP),
        thumb.confidence > 0.3, index.confidence > 0.3 {
-      // Vision: normalized [0,1], origin BOTTOM-LEFT of the full frame.
-      // Convert into the center-cropped (model aspect) region, origin TOP-LEFT.
-      let modelAspect = CGFloat(modelWidth) / CGFloat(modelHeight)
-      let frameAspect = frameWidth / frameHeight
-      var cropX: CGFloat = 0
-      var cropY: CGFloat = 0
-      var cropW: CGFloat = 1
-      var cropH: CGFloat = 1
-      if frameAspect > modelAspect {
-        cropW = modelAspect / frameAspect
-        cropX = (1 - cropW) / 2
-      } else {
-        cropH = frameAspect / modelAspect
-        cropY = (1 - cropH) / 2
-      }
+      // Vision: normalized [0,1], origin BOTTOM-LEFT; the input already IS
+      // the upright center crop, so only the y-flip is needed.
       func toCropSpace(_ p: VNRecognizedPoint) -> (Double, Double) {
-        let x = (p.location.x - cropX) / cropW
-        let y = ((1 - p.location.y) - cropY) / cropH
-        return (Double(x), Double(y))
+        return (Double(p.location.x), Double(1 - p.location.y))
       }
       let handSize = max(
         hypot(wrist.location.x - middleMCP.location.x,
@@ -495,26 +449,5 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     let value = status
     lock.unlock()
     return value
-  }
-}
-
-/// Minimal atomic test-and-set flag (drop-if-busy gate).
-final class NitroAtomicFlag {
-  private let lock = NSLock()
-  private var value = false
-
-  /// Returns the previous value and sets the flag.
-  func testAndSet() -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    let previous = value
-    value = true
-    return previous
-  }
-
-  func clear() {
-    lock.lock()
-    value = false
-    lock.unlock()
   }
 }

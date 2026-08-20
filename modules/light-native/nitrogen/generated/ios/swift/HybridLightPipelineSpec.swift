@@ -15,9 +15,8 @@ public protocol HybridLightPipelineSpec_protocol: HybridObject {
   var lastFaceRollDegrees: Double { get }
 
   // Methods
-  func submitFrame(pointer: UInt64, orientationDegrees: Double, runDepth: Bool, runHands: Bool) throws -> Void
+  func analyzeSync(pointer: UInt64, orientationDegrees: Double, runHands: Bool) throws -> DepthResult
   func getDepthResult() throws -> DepthResult
-  func runDepthSync(pointer: UInt64, orientationDegrees: Double) throws -> DepthResult
   func getHandResult() throws -> HandResult
   func setControls(controls: LightControls) throws -> Void
   func getControls() throws -> LightControls

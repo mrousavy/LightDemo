@@ -89,22 +89,16 @@ namespace margelo::nitro::lightnative {
 
   public:
     // Methods
-    inline void submitFrame(uint64_t pointer, double orientationDegrees, bool runDepth, bool runHands) override {
-      auto __result = _swiftPart.submitFrame(std::forward<decltype(pointer)>(pointer), std::forward<decltype(orientationDegrees)>(orientationDegrees), std::forward<decltype(runDepth)>(runDepth), std::forward<decltype(runHands)>(runHands));
-      if (__result.hasError()) [[unlikely]] {
-        std::rethrow_exception(__result.error());
-      }
-    }
-    inline DepthResult getDepthResult() override {
-      auto __result = _swiftPart.getDepthResult();
+    inline DepthResult analyzeSync(uint64_t pointer, double orientationDegrees, bool runHands) override {
+      auto __result = _swiftPart.analyzeSync(std::forward<decltype(pointer)>(pointer), std::forward<decltype(orientationDegrees)>(orientationDegrees), std::forward<decltype(runHands)>(runHands));
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }
       auto __value = std::move(__result.value());
       return __value;
     }
-    inline DepthResult runDepthSync(uint64_t pointer, double orientationDegrees) override {
-      auto __result = _swiftPart.runDepthSync(std::forward<decltype(pointer)>(pointer), std::forward<decltype(orientationDegrees)>(orientationDegrees));
+    inline DepthResult getDepthResult() override {
+      auto __result = _swiftPart.getDepthResult();
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

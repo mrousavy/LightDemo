@@ -377,9 +377,6 @@ function LightView() {
       else if (frame.orientation === 'left') rotationDeg = 270
       const nativeBuffer = frame.getNativeBuffer()
       try {
-        // Kick hand analysis (async, drop-if-busy). Depth runs synchronously
-        // below so lighting always matches this exact frame.
-        nitro.submitFrame(nativeBuffer.pointer, rotationDeg, false, controlsNow.handControl)
 
         const videoFrame = rnwgpu.createVideoFrameFromNativeBuffer(nativeBuffer.pointer)
         try {
@@ -393,9 +390,14 @@ function LightView() {
 
           const encoder = device.createCommandEncoder()
 
-          // --- depth: synchronous, same-frame (async depth lags the camera
-          // image and paints ghost trails behind fast-moving objects) ---
-          const depth = nitro.runDepthSync(nativeBuffer.pointer, rotationDeg)
+          // --- depth + hands: fully synchronous, same-frame (async results
+          // lag the camera image; a stale depth map paints ghost trails
+          // behind fast-moving objects) ---
+          const depth = nitro.analyzeSync(
+            nativeBuffer.pointer,
+            rotationDeg,
+            controlsNow.handControl,
+          )
           let reset = 0
           if (depth.seq >= 0 && depth.seq !== box.lastDepthSeq) {
             box.lastDepthSeq = depth.seq
