@@ -56,7 +56,7 @@ namespace margelo::nitro::lightnative {
       // Properties
       virtual double getDepthWidth() = 0;
       virtual double getDepthHeight() = 0;
-      virtual double getDetectedOrientationDegrees() = 0;
+      virtual double getLastFaceRollDegrees() = 0;
 
     public:
       // Methods

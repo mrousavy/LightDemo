@@ -12,7 +12,7 @@ public protocol HybridLightPipelineSpec_protocol: HybridObject {
   // Properties
   var depthWidth: Double { get }
   var depthHeight: Double { get }
-  var detectedOrientationDegrees: Double { get }
+  var lastFaceRollDegrees: Double { get }
 
   // Methods
   func submitFrame(pointer: UInt64, orientationDegrees: Double, runDepth: Bool, runHands: Bool) throws -> Void

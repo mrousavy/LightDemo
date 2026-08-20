@@ -16,7 +16,7 @@ namespace margelo::nitro::lightnative {
     registerHybrids(this, [](Prototype& prototype) {
       prototype.registerHybridGetter("depthWidth", &HybridLightPipelineSpec::getDepthWidth);
       prototype.registerHybridGetter("depthHeight", &HybridLightPipelineSpec::getDepthHeight);
-      prototype.registerHybridGetter("detectedOrientationDegrees", &HybridLightPipelineSpec::getDetectedOrientationDegrees);
+      prototype.registerHybridGetter("lastFaceRollDegrees", &HybridLightPipelineSpec::getLastFaceRollDegrees);
       prototype.registerHybridMethod("submitFrame", &HybridLightPipelineSpec::submitFrame);
       prototype.registerHybridMethod("getDepthResult", &HybridLightPipelineSpec::getDepthResult);
       prototype.registerHybridMethod("getHandResult", &HybridLightPipelineSpec::getHandResult);

@@ -22,13 +22,16 @@ export interface LightPipeline
   /** Height of the depth model's input/output in pixels. */
   readonly depthHeight: number
   /**
-   * Auto-detected buffer orientation in degrees (0/90/180/270), or -1 while
-   * unknown. Detected by running Vision face detection in all four
-   * orientations on the hand-detection queue - the orientation that finds a
-   * face is the upright one. Re-verified periodically (gimbal cameras can
-   * physically rotate mid-session).
+   * The in-plane rotation (roll, degrees) of the most recently detected face
+   * in the RAW buffer, measured periodically on the hand-detection queue, or
+   * -999 while no face has been seen. Modern Vision face detection is
+   * rotation-invariant, so a "which orientation finds a face" scan cannot
+   * discriminate - but the observation's roll angle directly tells us how
+   * the buffer is rotated. The JS side maps this to a display rotation
+   * (gimbal cameras can physically rotate mid-session, so it re-measures
+   * continuously).
    */
-  readonly detectedOrientationDegrees: number
+  readonly lastFaceRollDegrees: number
 
   /**
    * Submit a camera frame (a `CVPixelBufferRef` pointer from

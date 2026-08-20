@@ -353,14 +353,20 @@ function LightView() {
       // the camera texture (Dawn), the depth-model input (CoreImage) and the
       // hand detector (Vision) so all three stay in the same display space.
       let rotationDeg: 0 | 90 | 180 | 270 = 0
-      const detectedDeg = nitro.detectedOrientationDegrees
+      const faceRoll = nitro.lastFaceRollDegrees
       if (controlsNow.rotationOverride >= 0) {
         rotationDeg = controlsNow.rotationOverride as 0 | 90 | 180 | 270
-      } else if (detectedDeg >= 0) {
-        // Face-calibrated orientation - the most reliable source (the
-        // VisionCamera tag is derived from the AVCaptureConnection's default
-        // portrait videoOrientation and is wrong for external cameras).
-        rotationDeg = detectedDeg as 0 | 90 | 180 | 270
+      } else if (faceRoll > -900) {
+        // Face-calibrated orientation: the roll of a detected face in the
+        // raw buffer tells us how the buffer is rotated (the VisionCamera
+        // tag comes from the connection's default portrait videoOrientation
+        // and is wrong for external/gimbal cameras). ROLL_SIGN converts
+        // Vision's y-up roll into our display-rotation direction (validated
+        // live; flip if a camera ever disagrees).
+        const ROLL_SIGN = -1
+        const quantized =
+          ((Math.round((ROLL_SIGN * faceRoll) / 90) * 90) % 360 + 360) % 360
+        rotationDeg = quantized as 0 | 90 | 180 | 270
       } else if (frame.orientation === 'right') rotationDeg = 90
       else if (frame.orientation === 'down') rotationDeg = 180
       else if (frame.orientation === 'left') rotationDeg = 270
@@ -672,7 +678,7 @@ function LightView() {
                 `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
                 `tracked=${hand.tracked} pinch=${hand.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
-                `grabbed=${box.grabbed} rot=${rotationDeg} detected=${detectedDeg}`,
+                `grabbed=${box.grabbed} rot=${rotationDeg} roll=${faceRoll.toFixed(0)}`,
             )
           }
           if (box.frameCount % 15 === 0) {

@@ -135,10 +135,10 @@ open class HybridLightPipelineSpec_cxx {
     }
   }
   
-  public final var detectedOrientationDegrees: Double {
+  public final var lastFaceRollDegrees: Double {
     @inline(__always)
     get {
-      return self.__implementation.detectedOrientationDegrees
+      return self.__implementation.lastFaceRollDegrees
     }
   }
 

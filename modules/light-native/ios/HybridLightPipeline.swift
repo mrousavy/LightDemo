@@ -46,17 +46,17 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
   // Face-based orientation auto-calibration (see spec docs).
   private var orientationScanCountdown = 0
-  private var detectedOrientationDeg: Int = -1
+  private var lastRollDeg: Double = -999
 
   private var controls: LightControls
   private var status: LightStatus
 
   var depthWidth: Double { Double(modelWidth) }
   var depthHeight: Double { Double(modelHeight) }
-  var detectedOrientationDegrees: Double {
+  var lastFaceRollDegrees: Double {
     lock.lock()
     defer { lock.unlock() }
-    return Double(detectedOrientationDeg)
+    return lastRollDeg
   }
 
   init(model: MLModel, inputWidth: Int, inputHeight: Int) throws {
@@ -333,43 +333,35 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
   // MARK: - Hands
 
-  /// Try face detection in all four orientations; the one that finds the
-  /// highest-confidence face is the buffer's true upright orientation.
+  /// Measure the in-plane rotation of a face in the RAW buffer. Vision's
+  /// face detector is rotation-invariant, so the observation's `roll` angle
+  /// tells us directly how the buffer content is rotated.
   private func scanOrientation(on pixelBuffer: CVPixelBuffer) {
-    var best: (deg: Int, confidence: Float)? = nil
-    let candidates: [(Int, CGImagePropertyOrientation)] = [
-      (0, .up), (90, .right), (180, .down), (270, .left),
-    ]
-    for (deg, orientation) in candidates {
-      let request = VNDetectFaceRectanglesRequest()
-      let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
-      try? handler.perform([request])
-      if let face = request.results?.max(by: { $0.confidence < $1.confidence }) {
-        if best == nil || face.confidence > best!.confidence {
-          best = (deg, face.confidence)
-        }
-      }
-    }
-    if let best, best.confidence > 0.5 {
-      lock.lock()
-      detectedOrientationDeg = best.deg
-      lock.unlock()
-    }
+    let request = VNDetectFaceRectanglesRequest()
+    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+    try? handler.perform([request])
+    guard let face = request.results?.max(by: { $0.confidence < $1.confidence }),
+          face.confidence > 0.5,
+          let roll = face.roll?.doubleValue
+    else { return }
+    lock.lock()
+    lastRollDeg = roll * 180 / .pi
+    lock.unlock()
   }
 
   private func runHandDetection(
     on pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation
   ) {
-    // Piggyback the orientation auto-calibration on this queue: scan often
-    // until a face locks the orientation, then re-verify every ~20s (gimbal
+    // Piggyback the orientation auto-calibration on this queue: measure
+    // often until a face has been seen, then re-measure every ~3s (gimbal
     // cameras can physically rotate mid-session).
     orientationScanCountdown -= 1
     if orientationScanCountdown <= 0 {
       scanOrientation(on: pixelBuffer)
       lock.lock()
-      let locked = detectedOrientationDeg >= 0
+      let seen = lastRollDeg > -900
       lock.unlock()
-      orientationScanCountdown = locked ? 600 : 45
+      orientationScanCountdown = seen ? 120 : 30
     }
 
     let start = CACurrentMediaTime()
