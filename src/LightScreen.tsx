@@ -213,7 +213,7 @@ function LightView() {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const relightParamsBuffer = device.createBuffer({
-      size: 80,
+      size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const historyBuffer = device.createBuffer({
@@ -704,7 +704,7 @@ function LightView() {
           } else {
             cropH = frameAspect / modelAspect
           }
-          const relightParams = new ArrayBuffer(80)
+          const relightParams = new ArrayBuffer(96)
           const rpF32 = new Float32Array(relightParams)
           const rpU32 = new Uint32Array(relightParams)
           rpF32[0] = controlsNow.colorR
@@ -722,11 +722,14 @@ function LightView() {
           rpF32[12] = controlsNow.occlusion
           rpU32[13] = controlsNow.mode
           rpU32[14] = mirrored ? 1 : 0
-          rpF32[15] = 0
+          // Canvas aspect for the shader's world-space distance math (the
+          // canvas matches the depth model's aspect).
+          rpF32[15] = pipeline.depthW / pipeline.depthH
           rpF32[16] = cropW
           rpF32[17] = cropH
           rpF32[18] = (1 - cropW) / 2
           rpF32[19] = (1 - cropH) / 2
+          rpF32[20] = (renderStart / 1000) % 1000
           device.queue.writeBuffer(pipeline.relightParamsBuffer, 0, relightParams)
 
           const externalTexture = device.importExternalTexture({

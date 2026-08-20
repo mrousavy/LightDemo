@@ -202,9 +202,29 @@ struct RelightParams {
   occlusionAmount: f32,
   mode: u32,          // 0 relit, 1 camera, 2 depth, 3 normals
   mirror: u32,
-  _pad0: f32,
+  aspect: f32,        // canvas width / height
   cropScale: vec2f,   // display uv -> camera-buffer uv (center crop)
   cropOffset: vec2f,
+  time: f32,          // seconds, for the bulb flicker
+  _pad1: f32,
+  _pad2: vec2f,
+}
+
+// All distance math runs in aspect-corrected "world" units (y-height = 1):
+// the original demo forces a SQUARE canvas so plain UV distances work; on a
+// non-square canvas UV circles render as ellipses (the squished bulb) and
+// light falloff turns anisotropic.
+fn worldFromUv(uv: vec2f) -> vec2f {
+  return vec2f((uv.x - 0.5) * params.aspect, uv.y - 0.5);
+}
+fn uvFromWorld(w: vec2f) -> vec2f {
+  return vec2f(w.x / params.aspect + 0.5, w.y + 0.5);
+}
+
+// Gentle filament flicker: a few incommensurate sines, +-3%.
+fn flicker(t: f32) -> f32 {
+  return 1.0 + 0.022 * sin(t * 7.3) * sin(t * 12.7 + 1.7)
+             + 0.014 * sin(t * 23.0 + 0.5);
 }
 
 @group(0) @binding(0) var<uniform> params: RelightParams;
@@ -245,19 +265,21 @@ fn ignDither(uv: vec2f) -> f32 {
   return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
+// origin/lightDirection are in aspect-corrected world space; texture
+// lookups convert back through uvFromWorld.
 fn shadowFactor(origin: vec3f, lightDirection: vec3f, reach: f32, jitter: f32) -> f32 {
   let stride = reach / f32(SHADOW_STEPS);
   let baselineTravel = reach * (SHADOW_BASELINE / SHADOW_SPAN);
   let trailProbe = origin - lightDirection * baselineTravel;
   let receiverRise = max(
-    origin.z - shadowZ(depthAt(trailProbe.xy + vec2f(0.5))) - baselineTravel * lightDirection.z,
+    origin.z - shadowZ(depthAt(uvFromWorld(trailProbe.xy))) - baselineTravel * lightDirection.z,
     0.0);
   let risePerTravel = receiverRise / baselineTravel;
   var occlusion = 0.0;
   for (var step = 0; step < SHADOW_STEPS; step++) {
     let travel = (f32(step) + jitter) * stride;
     let probe = origin + lightDirection * travel;
-    let sampleZ = shadowZ(depthAt(probe.xy + vec2f(0.5)));
+    let sampleZ = shadowZ(depthAt(uvFromWorld(probe.xy)));
     let difference = sampleZ - probe.z;
     let bias = SHADOW_BIAS + travel * (SHADOW_SLOPE_BIAS + risePerTravel);
     let thickness = SHADOW_THICKNESS * (1.0 + (travel / SHADOW_SPAN) * SHADOW_THICKNESS_GROWTH);
@@ -283,18 +305,19 @@ fn bulbRadius() -> f32 {
   return BULB_WORLD_RADIUS * ((BULB_CAMERA_Z - BULB_REFERENCE_Z) / (BULB_CAMERA_Z - params.lightZ));
 }
 fn bulbExposure(radius: f32) -> f32 {
+  let lightWorld = worldFromUv(params.lightPosition);
   var open = 0.0;
   for (var sy = -1; sy <= 1; sy++) {
     for (var sx = -1; sx <= 1; sx++) {
-      let probe = params.lightPosition + vec2f(f32(sx), f32(sy)) * (radius * BULB_SAMPLE_SPREAD);
-      open += smoothstep(0.0, BULB_SOURCE_SOFTNESS, params.lightZ - surfaceZ(depthAt(probe)));
+      let probe = lightWorld + vec2f(f32(sx), f32(sy)) * (radius * BULB_SAMPLE_SPREAD);
+      open += smoothstep(0.0, BULB_SOURCE_SOFTNESS, params.lightZ - surfaceZ(depthAt(uvFromWorld(probe))));
     }
   }
   return open / 9.0;
 }
 fn bulbSurface(uv: vec2f, tint: vec3f, depthValue: f32) -> vec4f {
   let radius = bulbRadius();
-  let spread = length(uv - params.lightPosition) / radius;
+  let spread = length(worldFromUv(uv) - worldFromUv(params.lightPosition)) / radius;
   let limb = saturate(spread);
   let dome = sqrt(max(1.0 - limb * limb, 0.0));
   let facing = dome * dome;
@@ -307,7 +330,7 @@ fn bulbSurface(uv: vec2f, tint: vec3f, depthValue: f32) -> vec4f {
 }
 fn bulbGlow(uv: vec2f, tint: vec3f) -> vec3f {
   let radius = bulbRadius();
-  let radii = length(uv - params.lightPosition) / radius;
+  let radii = length(worldFromUv(uv) - worldFromUv(params.lightPosition)) / radius;
   let halo = exp(-radii / BULB_HALO_SPAN);
   let veil = exp(-radii / BULB_VEIL_SPAN);
   return tint * ((halo * BULB_HALO + veil * BULB_VEIL) * bulbExposure(radius));
@@ -341,10 +364,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
   let normal = normalize(vec3f(tilt, 1.0));
   if (params.mode == 3u) { return vec4f(normal * 0.5 + 0.5, 1.0); }
 
-  let centered = uv - vec2f(0.5);
+  let world = worldFromUv(uv);
   let noise = ignDither(uv);
-  let position = vec3f(centered, surfaceZ(surface.w));
-  let lightPosition = vec3f(params.lightPosition - vec2f(0.5), params.lightZ);
+  let position = vec3f(world, surfaceZ(surface.w));
+  let lightPosition = vec3f(worldFromUv(params.lightPosition), params.lightZ);
   let toLight = lightPosition - position;
   let dist = max(length(toLight), 0.0001);
   let lightDirection = toLight / dist;
@@ -355,7 +378,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
   var shadow = 1.0;
   if (params.shadowAmount > 0.0) {
-    let shadowOrigin = vec3f(centered, shadowZ(surface.w));
+    let shadowOrigin = vec3f(world, shadowZ(surface.w));
     let shadowToLight = lightPosition - shadowOrigin;
     let shadowDistance = max(length(shadowToLight), 0.0001);
     let reach = shadowDistance * (SHADOW_SPAN / max(length(shadowToLight.xy), SHADOW_SPAN));
@@ -371,13 +394,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
   let grazing = pow(1.0 - saturate(normal.z), 5.0);
   let highlight = lobe * (SPECULAR_F0 + (1.0 - SPECULAR_F0) * grazing);
 
+  // Filament flicker: light emission and the bulb surface breathe together.
+  let flick = flicker(params.time);
   var lit = albedo * AMBIENT_FILL * (params.exposure * occlusion);
-  lit += albedo * tint * (lambert * falloff * shadow * params.intensity);
-  lit += tint * (highlight * falloff * shadow * occlusion * params.specularAmount * params.intensity);
+  lit += albedo * tint * (lambert * falloff * shadow * params.intensity * flick);
+  lit += tint * (highlight * falloff * shadow * occlusion * params.specularAmount * params.intensity * flick);
   let presence = bulbPresence();
   let bulb = bulbSurface(uv, tint, surface.w);
-  lit = mix(lit, bulb.rgb * presence, bulb.a * presence);
-  lit += bulbGlow(uv, tint) * presence;
+  lit = mix(lit, bulb.rgb * presence * flick, bulb.a * presence);
+  lit += bulbGlow(uv, tint) * presence * flick;
   let display = pow(tonemap(lit), vec3f(1.0 / GAMMA));
   return vec4f(display + vec3f((noise - 0.5) * DITHER_STEP), 1.0);
 }
