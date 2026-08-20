@@ -48,12 +48,13 @@ namespace margelo::nitro::lightnative {
     double midX     SWIFT_PRIVATE;
     double midY     SWIFT_PRIVATE;
     double pinchRatio     SWIFT_PRIVATE;
+    double handSize     SWIFT_PRIVATE;
     double confidence     SWIFT_PRIVATE;
     double detectionTimeMs     SWIFT_PRIVATE;
 
   public:
     HandResult() = default;
-    explicit HandResult(double seq, bool tracked, double thumbX, double thumbY, double indexX, double indexY, double midX, double midY, double pinchRatio, double confidence, double detectionTimeMs): seq(seq), tracked(tracked), thumbX(thumbX), thumbY(thumbY), indexX(indexX), indexY(indexY), midX(midX), midY(midY), pinchRatio(pinchRatio), confidence(confidence), detectionTimeMs(detectionTimeMs) {}
+    explicit HandResult(double seq, bool tracked, double thumbX, double thumbY, double indexX, double indexY, double midX, double midY, double pinchRatio, double handSize, double confidence, double detectionTimeMs): seq(seq), tracked(tracked), thumbX(thumbX), thumbY(thumbY), indexX(indexX), indexY(indexY), midX(midX), midY(midY), pinchRatio(pinchRatio), handSize(handSize), confidence(confidence), detectionTimeMs(detectionTimeMs) {}
 
   public:
     friend bool operator==(const HandResult& lhs, const HandResult& rhs) = default;
@@ -78,6 +79,7 @@ namespace margelo::nitro {
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midX"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midY"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "pinchRatio"))),
+        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "handSize"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "confidence"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "detectionTimeMs")))
       );
@@ -93,6 +95,7 @@ namespace margelo::nitro {
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "midX"), JSIConverter<double>::toJSI(runtime, arg.midX));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "midY"), JSIConverter<double>::toJSI(runtime, arg.midY));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "pinchRatio"), JSIConverter<double>::toJSI(runtime, arg.pinchRatio));
+      obj.setProperty(runtime, PropNameIDCache::get(runtime, "handSize"), JSIConverter<double>::toJSI(runtime, arg.handSize));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "confidence"), JSIConverter<double>::toJSI(runtime, arg.confidence));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "detectionTimeMs"), JSIConverter<double>::toJSI(runtime, arg.detectionTimeMs));
       return obj;
@@ -114,6 +117,7 @@ namespace margelo::nitro {
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midX")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midY")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "pinchRatio")))) return false;
+      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "handSize")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "confidence")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "detectionTimeMs")))) return false;
       return true;

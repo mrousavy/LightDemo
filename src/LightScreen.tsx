@@ -386,6 +386,7 @@ function LightView() {
       velX: 0,
       velY: 0,
       lostFrames: 0,
+      handSizeSmoothed: 0,
       // Cached zero-copy depth import, keyed by the IOSurface pointer. With
       // CoreML output backings the pointer is stable, so the import and
       // bind group happen once and only the access window is per-frame.
@@ -594,33 +595,49 @@ function LightView() {
                   box.lightX += (handX - box.lightX) * 0.5
                   box.lightY += (handY - box.lightY) * 0.5
                   freshHandUpdate = true
-                  // Light depth = the FINGERTIPS' depth. The pinch midpoint
-                  // alone often lands on the background peeking between the
-                  // fingers, which pushed the light a few cm behind the hand
-                  // and made it glitch - so sample small neighborhoods
-                  // around thumb tip, index tip and midpoint and take the
-                  // NEAREST disparity (the fingers are the nearest surface).
-                  // Native bounded probe - the depth map itself is GPU-only.
+                  // Light depth = HYBRID of two signals, each doing what it
+                  // is actually good at:
+                  //
+                  // 1. SCENE-COHERENT BASE: the depth map sampled at the
+                  //    fingertips (nearest disparity over small tap
+                  //    neighborhoods). This is the hand's z in the SAME
+                  //    normalized space the shading/occlusion uses, so the
+                  //    bulb is guaranteed to sit in front of whatever the
+                  //    hand is in front of (e.g. your face).
+                  //
+                  // 2. PROXIMITY EXTENSION: hand size (wrist->knuckle span,
+                  //    ~1/distance - the only absolute-ish cue; relative
+                  //    depth normalizes the nearest object to ~the same
+                  //    value regardless of physical distance). When the hand
+                  //    is deliberately pulled toward the camera it pushes
+                  //    the light beyond the scene plane - big bulb, toward
+                  //    the viewer - which pure scene depth cannot express.
                   const nearest = nitro.sampleDepthMax([
                     hand.thumbX, hand.thumbY,
                     hand.indexX, hand.indexY,
                     hand.midX, hand.midY,
                   ])
+                  let zScene = box.lightZ
                   if (nearest >= 0) {
                     const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
                     const normalized = Math.min(
                       Math.max((nearest - box.rangeLow) / span, 0),
                       1,
                     )
-                    // Place the light at the fingertips' depth within the
-                    // scene's own z range (surfaceZ space [-0.7, 0], small
-                    // forward bias so the bulb sits between the fingers
-                    // instead of embedded in them). Staying inside the scene
-                    // range is what lets nearer surfaces (e.g. you stepping
-                    // in front of the bulb) actually occlude it.
-                    const targetZ = -0.68 + normalized * 0.7 + 0.03
-                    box.lightZ += (targetZ - box.lightZ) * 0.25
+                    zScene = -0.7 + normalized * 0.7 + 0.04
                   }
+                  if (hand.handSize > 0) {
+                    box.handSizeSmoothed =
+                      box.handSizeSmoothed <= 0
+                        ? hand.handSize
+                        : box.handSizeSmoothed + (hand.handSize - box.handSizeSmoothed) * 0.3
+                  }
+                  const proximity = Math.min(
+                    Math.max((box.handSizeSmoothed - 0.26) / (0.45 - 0.26), 0),
+                    1,
+                  )
+                  const targetZ = zScene + proximity * 1.0
+                  box.lightZ += (targetZ - box.lightZ) * 0.25
                 }
               }
             } else if (!hand.tracked) {
@@ -763,7 +780,8 @@ function LightView() {
                 `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
                 `tracked=${hand.tracked} pinch=${hand.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
-                `grabbed=${box.grabbed} rot=${rotationDeg} roll=${faceRoll.toFixed(0)}`,
+                `grabbed=${box.grabbed} rot=${rotationDeg} roll=${faceRoll.toFixed(0)} ` +
+                `handSize=${hand.handSize.toFixed(3)}`,
             )
           }
           if (box.frameCount % 15 === 0) {

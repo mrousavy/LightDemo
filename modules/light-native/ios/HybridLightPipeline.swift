@@ -125,7 +125,8 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
     self.latestHand = HandResult(
       seq: -1, tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
-      midX: 0, midY: 0, pinchRatio: 1, confidence: 0, detectionTimeMs: 0)
+      midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0,
+      detectionTimeMs: 0)
     self.controls = LightControls(
       mode: 0, intensity: 3.0, exposure: 0.5, relief: 0.85, specular: 0.22,
       shadow: 0.7, occlusion: 0.55, colorR: 1.0, colorG: 0.83, colorB: 0.6,
@@ -415,7 +416,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
     var detected: (
       thumb: (Double, Double), index: (Double, Double),
-      pinchRatio: Double, confidence: Double
+      pinchRatio: Double, handSize: Double, confidence: Double
     )? = nil
 
     do {
@@ -444,6 +445,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
         thumb: toCropSpace(thumb),
         index: toCropSpace(index),
         pinchRatio: Double(pinchDistance / handSize),
+        handSize: Double(handSize),
         confidence: Double(min(thumb.confidence, index.confidence))
       )
     }
@@ -458,13 +460,13 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
         indexX: hand.index.0, indexY: hand.index.1,
         midX: (hand.thumb.0 + hand.index.0) / 2,
         midY: (hand.thumb.1 + hand.index.1) / 2,
-        pinchRatio: hand.pinchRatio, confidence: hand.confidence,
-        detectionTimeMs: elapsed)
+        pinchRatio: hand.pinchRatio, handSize: hand.handSize,
+        confidence: hand.confidence, detectionTimeMs: elapsed)
     } else {
       latestHand = HandResult(
         seq: Double(handSeq), tracked: false, thumbX: 0, thumbY: 0,
         indexX: 0, indexY: 0, midX: 0, midY: 0, pinchRatio: 1,
-        confidence: 0, detectionTimeMs: elapsed)
+        handSize: 0, confidence: 0, detectionTimeMs: elapsed)
     }
     lock.unlock()
   }

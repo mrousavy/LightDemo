@@ -18,8 +18,8 @@ public extension HandResult {
   /**
    * Create a new instance of `HandResult`.
    */
-  init(seq: Double, tracked: Bool, thumbX: Double, thumbY: Double, indexX: Double, indexY: Double, midX: Double, midY: Double, pinchRatio: Double, confidence: Double, detectionTimeMs: Double) {
-    self.init(seq, tracked, thumbX, thumbY, indexX, indexY, midX, midY, pinchRatio, confidence, detectionTimeMs)
+  init(seq: Double, tracked: Bool, thumbX: Double, thumbY: Double, indexX: Double, indexY: Double, midX: Double, midY: Double, pinchRatio: Double, handSize: Double, confidence: Double, detectionTimeMs: Double) {
+    self.init(seq, tracked, thumbX, thumbY, indexX, indexY, midX, midY, pinchRatio, handSize, confidence, detectionTimeMs)
   }
 
   @inline(__always)
@@ -65,6 +65,11 @@ public extension HandResult {
   @inline(__always)
   var pinchRatio: Double {
     return self.__pinchRatio
+  }
+  
+  @inline(__always)
+  var handSize: Double {
+    return self.__handSize
   }
   
   @inline(__always)

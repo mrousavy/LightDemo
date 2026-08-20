@@ -25,6 +25,13 @@ export interface HandResult {
    * (wrist to middle-finger-MCP distance). ~0.1-0.25 = pinching, > 0.4 = open.
    */
   pinchRatio: number
+  /**
+   * Wrist to middle-finger-MCP distance in normalized crop units. Grows
+   * proportionally to 1/distance-from-camera, making it the only
+   * absolute-ish depth cue available (relative depth models normalize the
+   * nearest object - usually the hand itself - to the same value).
+   */
+  handSize: number
   /** Minimum Vision confidence across the used joints, 0-1. */
   confidence: number
   /** Detection wall time in milliseconds (for the HUD). */
