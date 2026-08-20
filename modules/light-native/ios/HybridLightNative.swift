@@ -30,7 +30,13 @@ final class HybridLightNative: HybridLightNativeSpec {
 
   private static func loadDepthModel() throws -> MLModel {
     let configuration = MLModelConfiguration()
-    configuration.computeUnits = .all
+    // .all lets CoreML's cost model pick the GPU in this iOS-on-Mac process
+    // (~42ms/frame); pinning to the Neural Engine measures ~17ms on M1 Max.
+    if #available(iOS 16.0, *) {
+      configuration.computeUnits = .cpuAndNeuralEngine
+    } else {
+      configuration.computeUnits = .all
+    }
 
     let bundle = modelsBundle()
     // Preferred: the resource-bundle target already compiled the .mlpackage.

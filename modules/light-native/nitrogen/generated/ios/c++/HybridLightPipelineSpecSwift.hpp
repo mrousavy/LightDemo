@@ -83,11 +83,14 @@ namespace margelo::nitro::lightnative {
     inline double getDepthHeight() noexcept override {
       return _swiftPart.getDepthHeight();
     }
+    inline double getDetectedOrientationDegrees() noexcept override {
+      return _swiftPart.getDetectedOrientationDegrees();
+    }
 
   public:
     // Methods
-    inline void submitFrame(uint64_t pointer, bool runDepth, bool runHands) override {
-      auto __result = _swiftPart.submitFrame(std::forward<decltype(pointer)>(pointer), std::forward<decltype(runDepth)>(runDepth), std::forward<decltype(runHands)>(runHands));
+    inline void submitFrame(uint64_t pointer, double orientationDegrees, bool runDepth, bool runHands) override {
+      auto __result = _swiftPart.submitFrame(std::forward<decltype(pointer)>(pointer), std::forward<decltype(orientationDegrees)>(orientationDegrees), std::forward<decltype(runDepth)>(runDepth), std::forward<decltype(runHands)>(runHands));
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

@@ -18,8 +18,8 @@ public extension LightControls {
   /**
    * Create a new instance of `LightControls`.
    */
-  init(mode: Double, intensity: Double, exposure: Double, relief: Double, specular: Double, shadow: Double, occlusion: Double, colorR: Double, colorG: Double, colorB: Double, touchX: Double, touchY: Double, touchActive: Bool, lightZ: Double, handControl: Bool, mirror: Bool, snapshotPath: String) {
-    self.init(mode, intensity, exposure, relief, specular, shadow, occlusion, colorR, colorG, colorB, touchX, touchY, touchActive, lightZ, handControl, mirror, std.string(snapshotPath))
+  init(mode: Double, intensity: Double, exposure: Double, relief: Double, specular: Double, shadow: Double, occlusion: Double, colorR: Double, colorG: Double, colorB: Double, touchX: Double, touchY: Double, touchActive: Bool, lightZ: Double, handControl: Bool, mirror: Bool, rotationOverride: Double, snapshotPath: String) {
+    self.init(mode, intensity, exposure, relief, specular, shadow, occlusion, colorR, colorG, colorB, touchX, touchY, touchActive, lightZ, handControl, mirror, rotationOverride, std.string(snapshotPath))
   }
 
   @inline(__always)
@@ -100,6 +100,11 @@ public extension LightControls {
   @inline(__always)
   var mirror: Bool {
     return self.__mirror
+  }
+  
+  @inline(__always)
+  var rotationOverride: Double {
+    return self.__rotationOverride
   }
   
   @inline(__always)

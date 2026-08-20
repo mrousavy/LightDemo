@@ -21,6 +21,14 @@ export interface LightPipeline
   readonly depthWidth: number
   /** Height of the depth model's input/output in pixels. */
   readonly depthHeight: number
+  /**
+   * Auto-detected buffer orientation in degrees (0/90/180/270), or -1 while
+   * unknown. Detected by running Vision face detection in all four
+   * orientations on the hand-detection queue - the orientation that finds a
+   * face is the upright one. Re-verified periodically (gimbal cameras can
+   * physically rotate mid-session).
+   */
+  readonly detectedOrientationDegrees: number
 
   /**
    * Submit a camera frame (a `CVPixelBufferRef` pointer from
@@ -31,8 +39,18 @@ export interface LightPipeline
    *
    * Frames submitted while a task is still busy are dropped for that task.
    * Safe to call from the VisionCamera frame-processor worklet thread.
+   *
+   * {@linkcode orientationDegrees} is the rotation needed to display the
+   * buffer upright (VisionCamera's `Frame.orientation`: up=0, right=90,
+   * down=180, left=270). Depth maps and hand coordinates are produced in
+   * the upright (display) space.
    */
-  submitFrame(pointer: UInt64, runDepth: boolean, runHands: boolean): void
+  submitFrame(
+    pointer: UInt64,
+    orientationDegrees: number,
+    runDepth: boolean,
+    runHands: boolean
+  ): void
 
   /** Latest completed depth inference (seq -1 if none yet). */
   getDepthResult(): DepthResult

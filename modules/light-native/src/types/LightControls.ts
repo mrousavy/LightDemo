@@ -26,6 +26,14 @@ export interface LightControls {
   handControl: boolean
   /** Mirror the displayed image (mirror-like UX for front cameras). */
   mirror: boolean
+  /**
+   * Rotation override in degrees (0/90/180/270), or -1 to trust
+   * VisionCamera's `Frame.orientation` tag. External cameras on the Mac get
+   * tagged 'right' regardless of their physical mounting (the tag comes from
+   * the AVCaptureConnection's default portrait videoOrientation), so a
+   * landscape USB camera may need an explicit 0 here.
+   */
+  rotationOverride: number
   /** Take a window snapshot to this path on the next frame ("" = off). */
   snapshotPath: string
 }

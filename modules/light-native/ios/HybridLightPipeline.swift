@@ -4,6 +4,7 @@
 //
 
 import Accelerate
+import CoreImage
 import CoreML
 import CoreVideo
 import Foundation
@@ -13,9 +14,16 @@ import Vision
 /// Frame analysis pipeline: CoreML monocular depth (ANE) + Vision hand pose.
 /// Both tasks run on their own serial queues with drop-if-busy semantics.
 final class HybridLightPipeline: HybridLightPipelineSpec {
-  private let model: VNCoreMLModel
+  private let mlModel: MLModel
+  private let modelInputName: String
   private let modelWidth: Int
   private let modelHeight: Int
+
+  // Direct-CoreML preprocessing: GPU center-crop + scale into a reusable
+  // BGRA buffer (Vision's VNCoreMLRequest costs ~23ms extra per frame on
+  // the same model - measured 40ms vs 16.6ms direct on this M1 Max).
+  private let ciContext = CIContext(options: [.cacheIntermediates: false])
+  private var inputBuffer: CVPixelBuffer?
 
   private let depthQueue = DispatchQueue(label: "light.depth", qos: .userInteractive)
   private let handQueue = DispatchQueue(label: "light.hands", qos: .userInteractive)
@@ -30,18 +38,35 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private var depthLow: Float = 0
   private var depthHigh: Float = 1
   private var depthTimeMs: Double = 0
+  private var depthPrepMs: Double = 0
+  private var depthPredictMs: Double = 0
 
   private var handSeq: Int = -1
   private var latestHand: HandResult
+
+  // Face-based orientation auto-calibration (see spec docs).
+  private var orientationScanCountdown = 0
+  private var detectedOrientationDeg: Int = -1
 
   private var controls: LightControls
   private var status: LightStatus
 
   var depthWidth: Double { Double(modelWidth) }
   var depthHeight: Double { Double(modelHeight) }
+  var detectedOrientationDegrees: Double {
+    lock.lock()
+    defer { lock.unlock() }
+    return Double(detectedOrientationDeg)
+  }
 
   init(model: MLModel, inputWidth: Int, inputHeight: Int) throws {
-    self.model = try VNCoreMLModel(for: model)
+    self.mlModel = model
+    guard let inputName = model.modelDescription.inputDescriptionsByName.first(where: {
+      $0.value.imageConstraint != nil
+    })?.key else {
+      throw RuntimeError.error(withMessage: "Depth model has no image input")
+    }
+    self.modelInputName = inputName
     self.modelWidth = inputWidth
     self.modelHeight = inputHeight
     let count = inputWidth * inputHeight
@@ -58,7 +83,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       mode: 0, intensity: 3.0, exposure: 0.5, relief: 0.85, specular: 0.22,
       shadow: 0.7, occlusion: 0.55, colorR: 1.0, colorG: 0.83, colorB: 0.6,
       touchX: 0.34, touchY: 0.34, touchActive: false, lightZ: 0.42,
-      handControl: true, mirror: true, snapshotPath: "")
+      handControl: true, mirror: true, rotationOverride: -1, snapshotPath: "")
     self.status = LightStatus(
       frameCount: 0, fps: 0, renderTimeMs: 0, depthTimeMs: 0, handTimeMs: 0,
       frameWidth: 0, frameHeight: 0, frameOrientation: "", frameMirrored: false,
@@ -75,11 +100,13 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     return modelWidth * modelHeight * 4 * 2
   }
 
-  func submitFrame(pointer: UInt64, runDepth: Bool, runHands: Bool) throws {
+  func submitFrame(
+    pointer: UInt64, orientationDegrees: Double, runDepth: Bool, runHands: Bool
+  ) throws {
     guard let raw = UnsafeRawPointer(bitPattern: UInt(pointer)) else {
       throw RuntimeError.error(withMessage: "submitFrame: pointer is null")
     }
-    let pixelBuffer = Unmanaged<CVPixelBuffer>.fromOpaque(raw).takeUnretainedValue()
+    let orientation = Self.cgOrientation(fromDegrees: Int(orientationDegrees))
 
     if runDepth, !depthBusy.testAndSet() {
       // Retain the buffer for the async task; released when done.
@@ -89,7 +116,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
           Unmanaged.passUnretained(retained).release()
           self?.depthBusy.clear()
         }
-        self?.runDepthInference(on: retained)
+        self?.runDepthInference(on: retained, orientation: orientation)
       }
     }
     if runHands, !handBusy.testAndSet() {
@@ -99,30 +126,91 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
           Unmanaged.passUnretained(retained).release()
           self?.handBusy.clear()
         }
-        self?.runHandDetection(on: retained)
+        self?.runHandDetection(on: retained, orientation: orientation)
       }
     }
-    _ = pixelBuffer // caller keeps its own +1 until we return
+  }
+
+  /// Maps "degrees of rotation needed to display upright" to the EXIF-style
+  /// orientation tag (same convention as VisionCamera's CameraOrientation).
+  private static func cgOrientation(fromDegrees degrees: Int) -> CGImagePropertyOrientation {
+    switch ((degrees % 360) + 360) % 360 {
+    case 45..<135: return .right
+    case 135..<225: return .down
+    case 225..<315: return .left
+    default: return .up
+    }
   }
 
   // MARK: - Depth
 
-  private func runDepthInference(on pixelBuffer: CVPixelBuffer) {
+  /// Upright `source` by `orientation`, center-crop to the model aspect, and
+  /// scale into the reusable 392x294 BGRA input buffer on the GPU.
+  private func prepareModelInput(
+    from source: CVPixelBuffer, orientation: CGImagePropertyOrientation
+  ) -> CVPixelBuffer? {
+    if inputBuffer == nil {
+      let attributes: [CFString: Any] = [
+        kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+        kCVPixelBufferMetalCompatibilityKey: true,
+      ]
+      CVPixelBufferCreate(
+        kCFAllocatorDefault, modelWidth, modelHeight, kCVPixelFormatType_32BGRA,
+        attributes as CFDictionary, &inputBuffer)
+    }
+    guard let target = inputBuffer else { return nil }
+
+    var image = CIImage(cvPixelBuffer: source)
+    if orientation != .up {
+      image = image.oriented(orientation)
+    }
+    let extent = image.extent
+    let modelAspect = CGFloat(modelWidth) / CGFloat(modelHeight)
+    let sourceAspect = extent.width / extent.height
+    var cropRect = extent
+    if sourceAspect > modelAspect {
+      cropRect.size.width = extent.height * modelAspect
+      cropRect.origin.x = extent.origin.x + (extent.width - cropRect.size.width) / 2
+    } else {
+      cropRect.size.height = extent.width / modelAspect
+      cropRect.origin.y = extent.origin.y + (extent.height - cropRect.size.height) / 2
+    }
+    let scale = CGFloat(modelWidth) / cropRect.width
+    image = image
+      .cropped(to: cropRect)
+      .transformed(by: CGAffineTransform(translationX: -cropRect.origin.x, y: -cropRect.origin.y))
+      .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    ciContext.render(image, to: target)
+    return target
+  }
+
+  private func runDepthInference(
+    on pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation
+  ) {
     let start = CACurrentMediaTime()
-    let request = VNCoreMLRequest(model: model)
-    request.imageCropAndScaleOption = .centerCrop
-    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+    guard let input = prepareModelInput(from: pixelBuffer, orientation: orientation) else {
+      print("[LightPipeline] depth: failed to prepare model input")
+      return
+    }
+    let prepDone = CACurrentMediaTime()
+    let output: CVPixelBuffer
     do {
-      try handler.perform([request])
+      let provider = try MLDictionaryFeatureProvider(
+        dictionary: [modelInputName: MLFeatureValue(pixelBuffer: input)])
+      let prediction = try mlModel.prediction(from: provider)
+      guard let buffer = prediction.featureNames
+        .compactMap({ prediction.featureValue(for: $0)?.imageBufferValue })
+        .first
+      else {
+        print("[LightPipeline] depth: prediction has no image output")
+        return
+      }
+      output = buffer
     } catch {
       print("[LightPipeline] depth inference failed: \(error)")
       return
     }
-    guard let observation = request.results?.first as? VNPixelBufferObservation else {
-      print("[LightPipeline] depth: no VNPixelBufferObservation result")
-      return
-    }
-    let output = observation.pixelBuffer
+    let predictDone = CACurrentMediaTime()
     let outWidth = CVPixelBufferGetWidth(output)
     let outHeight = CVPixelBufferGetHeight(output)
     guard outWidth == modelWidth, outHeight == modelHeight else {
@@ -171,6 +259,8 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     depthLow = low
     depthHigh = high
     depthTimeMs = elapsed
+    depthPrepMs = (prepDone - start) * 1000
+    depthPredictMs = (predictDone - prepDone) * 1000
     lock.unlock()
   }
 
@@ -225,6 +315,8 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     let low = depthLow
     let high = depthHigh
     let time = depthTimeMs
+    let prep = depthPrepMs
+    let predict = depthPredictMs
     lock.unlock()
     let count = modelWidth * modelHeight
     let pointer = buffers[index]
@@ -235,19 +327,64 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       onDelete: { _ = self })
     return DepthResult(
       seq: Double(seq), width: Double(modelWidth), height: Double(modelHeight),
-      low: Double(low), high: Double(high), inferenceTimeMs: time, data: buffer)
+      low: Double(low), high: Double(high), inferenceTimeMs: time,
+      prepTimeMs: prep, predictTimeMs: predict, data: buffer)
   }
 
   // MARK: - Hands
 
-  private func runHandDetection(on pixelBuffer: CVPixelBuffer) {
+  /// Try face detection in all four orientations; the one that finds the
+  /// highest-confidence face is the buffer's true upright orientation.
+  private func scanOrientation(on pixelBuffer: CVPixelBuffer) {
+    var best: (deg: Int, confidence: Float)? = nil
+    let candidates: [(Int, CGImagePropertyOrientation)] = [
+      (0, .up), (90, .right), (180, .down), (270, .left),
+    ]
+    for (deg, orientation) in candidates {
+      let request = VNDetectFaceRectanglesRequest()
+      let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
+      try? handler.perform([request])
+      if let face = request.results?.max(by: { $0.confidence < $1.confidence }) {
+        if best == nil || face.confidence > best!.confidence {
+          best = (deg, face.confidence)
+        }
+      }
+    }
+    if let best, best.confidence > 0.5 {
+      lock.lock()
+      detectedOrientationDeg = best.deg
+      lock.unlock()
+    }
+  }
+
+  private func runHandDetection(
+    on pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation
+  ) {
+    // Piggyback the orientation auto-calibration on this queue: scan often
+    // until a face locks the orientation, then re-verify every ~20s (gimbal
+    // cameras can physically rotate mid-session).
+    orientationScanCountdown -= 1
+    if orientationScanCountdown <= 0 {
+      scanOrientation(on: pixelBuffer)
+      lock.lock()
+      let locked = detectedOrientationDeg >= 0
+      lock.unlock()
+      orientationScanCountdown = locked ? 600 : 45
+    }
+
     let start = CACurrentMediaTime()
     let request = VNDetectHumanHandPoseRequest()
     request.maximumHandCount = 1
-    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation)
 
-    let frameWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
-    let frameHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+    // Vision reports landmarks in the ORIENTED (upright) image space, so the
+    // crop math uses upright dimensions (swapped for 90/270 rotations).
+    let rotated = orientation == .right || orientation == .left
+      || orientation == .rightMirrored || orientation == .leftMirrored
+    let bufferWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+    let bufferHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+    let frameWidth = rotated ? bufferHeight : bufferWidth
+    let frameHeight = rotated ? bufferWidth : bufferHeight
 
     var detected: (
       thumb: (Double, Double), index: (Double, Double),

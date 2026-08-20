@@ -55,11 +55,12 @@ namespace margelo::nitro::lightnative {
     double lightZ     SWIFT_PRIVATE;
     bool handControl     SWIFT_PRIVATE;
     bool mirror     SWIFT_PRIVATE;
+    double rotationOverride     SWIFT_PRIVATE;
     std::string snapshotPath     SWIFT_PRIVATE;
 
   public:
     LightControls() = default;
-    explicit LightControls(double mode, double intensity, double exposure, double relief, double specular, double shadow, double occlusion, double colorR, double colorG, double colorB, double touchX, double touchY, bool touchActive, double lightZ, bool handControl, bool mirror, std::string snapshotPath): mode(mode), intensity(intensity), exposure(exposure), relief(relief), specular(specular), shadow(shadow), occlusion(occlusion), colorR(colorR), colorG(colorG), colorB(colorB), touchX(touchX), touchY(touchY), touchActive(touchActive), lightZ(lightZ), handControl(handControl), mirror(mirror), snapshotPath(snapshotPath) {}
+    explicit LightControls(double mode, double intensity, double exposure, double relief, double specular, double shadow, double occlusion, double colorR, double colorG, double colorB, double touchX, double touchY, bool touchActive, double lightZ, bool handControl, bool mirror, double rotationOverride, std::string snapshotPath): mode(mode), intensity(intensity), exposure(exposure), relief(relief), specular(specular), shadow(shadow), occlusion(occlusion), colorR(colorR), colorG(colorG), colorB(colorB), touchX(touchX), touchY(touchY), touchActive(touchActive), lightZ(lightZ), handControl(handControl), mirror(mirror), rotationOverride(rotationOverride), snapshotPath(snapshotPath) {}
 
   public:
     friend bool operator==(const LightControls& lhs, const LightControls& rhs) = default;
@@ -91,6 +92,7 @@ namespace margelo::nitro {
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "lightZ"))),
         JSIConverter<bool>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "handControl"))),
         JSIConverter<bool>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "mirror"))),
+        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "rotationOverride"))),
         JSIConverter<std::string>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "snapshotPath")))
       );
     }
@@ -112,6 +114,7 @@ namespace margelo::nitro {
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "lightZ"), JSIConverter<double>::toJSI(runtime, arg.lightZ));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "handControl"), JSIConverter<bool>::toJSI(runtime, arg.handControl));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "mirror"), JSIConverter<bool>::toJSI(runtime, arg.mirror));
+      obj.setProperty(runtime, PropNameIDCache::get(runtime, "rotationOverride"), JSIConverter<double>::toJSI(runtime, arg.rotationOverride));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "snapshotPath"), JSIConverter<std::string>::toJSI(runtime, arg.snapshotPath));
       return obj;
     }
@@ -139,6 +142,7 @@ namespace margelo::nitro {
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "lightZ")))) return false;
       if (!JSIConverter<bool>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "handControl")))) return false;
       if (!JSIConverter<bool>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "mirror")))) return false;
+      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "rotationOverride")))) return false;
       if (!JSIConverter<std::string>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "snapshotPath")))) return false;
       return true;
     }

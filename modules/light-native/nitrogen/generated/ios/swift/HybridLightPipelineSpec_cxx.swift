@@ -134,12 +134,19 @@ open class HybridLightPipelineSpec_cxx {
       return self.__implementation.depthHeight
     }
   }
+  
+  public final var detectedOrientationDegrees: Double {
+    @inline(__always)
+    get {
+      return self.__implementation.detectedOrientationDegrees
+    }
+  }
 
   // Methods
   @inline(__always)
-  public final func submitFrame(pointer: UInt64, runDepth: Bool, runHands: Bool) -> bridge.Result_void_ {
+  public final func submitFrame(pointer: UInt64, orientationDegrees: Double, runDepth: Bool, runHands: Bool) -> bridge.Result_void_ {
     do {
-      try self.__implementation.submitFrame(pointer: pointer, runDepth: runDepth, runHands: runHands)
+      try self.__implementation.submitFrame(pointer: pointer, orientationDegrees: orientationDegrees, runDepth: runDepth, runHands: runHands)
       return bridge.create_Result_void_()
     } catch (let __error) {
       let __exceptionPtr = __error.toCpp()

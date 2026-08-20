@@ -40,6 +40,7 @@ const LIGHT_Z_MAX = 1.65
 
 const DEFAULT_CONTROLS: LightControls = {
   mirror: true,
+  rotationOverride: -1,
   mode: 0,
   intensity: 3.0,
   exposure: 0.5,
@@ -277,13 +278,24 @@ function LightView() {
   }, [])
 
   const devices = useCameraDevices()
-  const cameraDevice = useMemo(
-    () =>
-      devices.find((d) => d.position === 'front') ??
-      devices.find((d) => d.position === 'back') ??
-      devices[0],
-    [devices],
-  )
+  // Never pick a Continuity Camera (iPhone). Prefer USB/external cameras,
+  // then the built-in front camera.
+  const cameraDevice = useMemo(() => {
+    const real = devices.filter((d) => !d.isContinuityCamera && d.type !== 'continuity')
+    const device =
+      real.find((d) => d.type === 'external') ??
+      real.find((d) => d.position === 'front') ??
+      real.find((d) => d.position === 'back') ??
+      real[0]
+    if (device != null) {
+      console.log(
+        `[LightDemo] camera: "${device.localizedName}" type=${device.type} ` +
+          `position=${device.position} (${devices.length} devices total)`,
+      )
+    }
+    return device
+  }, [devices])
+
 
   // Worklet-persistent mutable state. Captured once - the worklet closure is
   // only recreated if one of the (stable-after-init) captured values changes.
@@ -310,6 +322,9 @@ function LightView() {
       handValid: false,
       outlierCount: 0,
       pinchSmoothed: 1,
+      velX: 0,
+      velY: 0,
+      lostFrames: 0,
     }),
     [],
   )
@@ -334,10 +349,25 @@ function LightView() {
         )
       }
       const controlsNow = nitro.getControls()
+      // Rotation needed to display the buffer upright. Applied identically to
+      // the camera texture (Dawn), the depth-model input (CoreImage) and the
+      // hand detector (Vision) so all three stay in the same display space.
+      let rotationDeg: 0 | 90 | 180 | 270 = 0
+      const detectedDeg = nitro.detectedOrientationDegrees
+      if (controlsNow.rotationOverride >= 0) {
+        rotationDeg = controlsNow.rotationOverride as 0 | 90 | 180 | 270
+      } else if (detectedDeg >= 0) {
+        // Face-calibrated orientation - the most reliable source (the
+        // VisionCamera tag is derived from the AVCaptureConnection's default
+        // portrait videoOrientation and is wrong for external cameras).
+        rotationDeg = detectedDeg as 0 | 90 | 180 | 270
+      } else if (frame.orientation === 'right') rotationDeg = 90
+      else if (frame.orientation === 'down') rotationDeg = 180
+      else if (frame.orientation === 'left') rotationDeg = 270
       const nativeBuffer = frame.getNativeBuffer()
       try {
         // Kick depth + hand analysis (async, drop-if-busy).
-        nitro.submitFrame(nativeBuffer.pointer, true, controlsNow.handControl)
+        nitro.submitFrame(nativeBuffer.pointer, rotationDeg, true, controlsNow.handControl)
 
         const videoFrame = rnwgpu.createVideoFrameFromNativeBuffer(nativeBuffer.pointer)
         try {
@@ -345,15 +375,9 @@ function LightView() {
           // user wants mirror) holds. Applied consistently to the camera
           // fetch, the surface texture, and the hand coordinates.
           const mirrored = frame.isMirrored !== controlsNow.mirror
-          // NOTE: frame.orientation is ignored on purpose. On the Mac
-          // (Designed for iPad) the FaceTime camera delivers upright
-          // landscape buffers but VisionCamera tags them 'right' (iOS
-          // portrait-sensor assumption). Depth + hands (Vision, .up) use the
-          // raw buffer too, so rendering it unrotated keeps all three
-          // pipelines aligned in the same space.
-          const rotationDeg = 0 as const
-          const dispW = videoFrame.width
-          const dispH = videoFrame.height
+          const rotated = rotationDeg === 90 || rotationDeg === 270
+          const dispW = rotated ? videoFrame.height : videoFrame.width
+          const dispH = rotated ? videoFrame.width : videoFrame.height
 
           const encoder = device.createCommandEncoder()
 
@@ -398,6 +422,9 @@ function LightView() {
           }
 
           // --- hand interaction ---
+          const prevLightX = box.lightX
+          const prevLightY = box.lightY
+          let freshHandUpdate = false
           const hand = nitro.getHandResult()
           if (controlsNow.handControl && hand.seq >= 0 && hand.seq !== box.lastHandSeq) {
             box.lastHandSeq = hand.seq
@@ -435,6 +462,7 @@ function LightView() {
                 box.everControlled = true
                 box.lightX += (handX - box.lightX) * 0.06
                 box.lightY += (handY - box.lightY) * 0.06
+                freshHandUpdate = true
               }
               if (!box.grabbed) {
                 const dx = handX - box.lightX
@@ -464,26 +492,45 @@ function LightView() {
                   // Smoothly follow the pinch point.
                   box.lightX += (handX - box.lightX) * 0.5
                   box.lightY += (handY - box.lightY) * 0.5
-                  // Light depth follows the hand's depth in the scene.
-                  // Sample in crop space (un-mirror the smoothed position).
-                  const bufX = mirrored ? 1 - handX : handX
-                  const px = Math.min(
-                    Math.max(Math.floor(bufX * pipeline.depthW), 0),
-                    pipeline.depthW - 1,
-                  )
-                  const py = Math.min(
-                    Math.max(Math.floor(handY * pipeline.depthH), 0),
-                    pipeline.depthH - 1,
-                  )
+                  freshHandUpdate = true
+                  // Light depth = the FINGERTIPS' depth. The pinch midpoint
+                  // alone often lands on the background peeking between the
+                  // fingers, which pushed the light a few cm behind the hand
+                  // and made it glitch - so sample small neighborhoods
+                  // around thumb tip, index tip and midpoint and take the
+                  // NEAREST disparity (the fingers are the nearest surface).
                   const disparity = new Float32Array(depth.data)
-                  const d = disparity[py * pipeline.depthW + px]
-                  if (d === d) {
+                  const w = pipeline.depthW
+                  const h = pipeline.depthH
+                  let nearest = Number.NEGATIVE_INFINITY
+                  const points = [
+                    hand.thumbX, hand.thumbY,
+                    hand.indexX, hand.indexY,
+                    hand.midX, hand.midY,
+                  ]
+                  for (let p = 0; p < 6; p += 2) {
+                    const cx = Math.min(Math.max(Math.floor(points[p] * w), 2), w - 3)
+                    const cy = Math.min(Math.max(Math.floor(points[p + 1] * h), 2), h - 3)
+                    for (let t = 0; t < 5; t++) {
+                      const ox = t === 1 ? -2 : t === 2 ? 2 : 0
+                      const oy = t === 3 ? -2 : t === 4 ? 2 : 0
+                      const d = disparity[(cy + oy) * w + (cx + ox)]
+                      if (d === d && d > nearest) nearest = d
+                    }
+                  }
+                  if (nearest > Number.NEGATIVE_INFINITY) {
                     const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
                     const normalized = Math.min(
-                      Math.max((d - box.rangeLow) / span, 0),
+                      Math.max((nearest - box.rangeLow) / span, 0),
                       1,
                     )
-                    const targetZ = -0.55 + normalized * (0.9 + 0.55) + 0.06
+                    // Place the light at the fingertips' depth within the
+                    // scene's own z range (surfaceZ space [-0.7, 0], small
+                    // forward bias so the bulb sits between the fingers
+                    // instead of embedded in them). Staying inside the scene
+                    // range is what lets nearer surfaces (e.g. you stepping
+                    // in front of the bulb) actually occlude it.
+                    const targetZ = -0.68 + normalized * 0.7 + 0.03
                     box.lightZ += (targetZ - box.lightZ) * 0.25
                   }
                 }
@@ -492,6 +539,36 @@ function LightView() {
               box.pinchFrames = 0
               box.handValid = false
               box.outlierCount = 0
+            }
+          }
+
+          // --- momentum ---
+          // While the hand actively drives the light, measure its velocity;
+          // whenever the driving signal disappears (fingers released, or
+          // tracking lost - e.g. the hand moved behind a chair), coast on
+          // that velocity and bleed it off smoothly instead of freezing.
+          if (freshHandUpdate) {
+            box.velX = box.velX * 0.6 + (box.lightX - prevLightX) * 0.4
+            box.velY = box.velY * 0.6 + (box.lightY - prevLightY) * 0.4
+            box.lostFrames = 0
+          } else if (!controlsNow.touchActive && box.everControlled) {
+            box.lightX += box.velX
+            box.lightY += box.velY
+            box.velX *= 0.93
+            box.velY *= 0.93
+            if (Math.abs(box.velX) < 0.0004) box.velX = 0
+            if (Math.abs(box.velY) < 0.0004) box.velY = 0
+            box.lightX = Math.min(Math.max(box.lightX, 0.02), 0.98)
+            box.lightY = Math.min(Math.max(box.lightY, 0.02), 0.98)
+            // Auto-release a grab whose hand has been gone for ~1.5s so
+            // hover-steering can take over again when the hand returns.
+            if (box.grabbed) {
+              box.lostFrames += 1
+              if (box.lostFrames > 90) {
+                box.grabbed = false
+                box.pinchFrames = 0
+                box.lostFrames = 0
+              }
             }
           }
 
@@ -595,7 +672,7 @@ function LightView() {
                 `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
                 `tracked=${hand.tracked} pinch=${hand.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
-                `grabbed=${box.grabbed}`,
+                `grabbed=${box.grabbed} rot=${rotationDeg} detected=${detectedDeg}`,
             )
           }
           if (box.frameCount % 15 === 0) {
@@ -709,6 +786,19 @@ function LightView() {
           onPress={() => setControls((c) => ({ ...c, handControl: !c.handControl }))}>
           <Text style={styles.buttonText}>
             Hand: {controls.handControl ? 'on' : 'off'}
+          </Text>
+        </Pressable>
+        <Pressable
+          style={styles.button}
+          onPress={() =>
+            setControls((c) => {
+              const steps = [-1, 0, 90, 180, 270]
+              const next = steps[(steps.indexOf(c.rotationOverride) + 1) % steps.length]
+              return { ...c, rotationOverride: next }
+            })
+          }>
+          <Text style={styles.buttonText}>
+            Rot: {controls.rotationOverride < 0 ? 'auto' : `${controls.rotationOverride}°`}
           </Text>
         </Pressable>
         <Pressable

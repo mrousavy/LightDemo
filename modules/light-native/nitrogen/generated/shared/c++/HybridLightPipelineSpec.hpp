@@ -56,10 +56,11 @@ namespace margelo::nitro::lightnative {
       // Properties
       virtual double getDepthWidth() = 0;
       virtual double getDepthHeight() = 0;
+      virtual double getDetectedOrientationDegrees() = 0;
 
     public:
       // Methods
-      virtual void submitFrame(uint64_t pointer, bool runDepth, bool runHands) = 0;
+      virtual void submitFrame(uint64_t pointer, double orientationDegrees, bool runDepth, bool runHands) = 0;
       virtual DepthResult getDepthResult() = 0;
       virtual HandResult getHandResult() = 0;
       virtual void setControls(const LightControls& controls) = 0;

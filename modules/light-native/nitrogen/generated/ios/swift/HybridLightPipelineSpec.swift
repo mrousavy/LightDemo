@@ -12,9 +12,10 @@ public protocol HybridLightPipelineSpec_protocol: HybridObject {
   // Properties
   var depthWidth: Double { get }
   var depthHeight: Double { get }
+  var detectedOrientationDegrees: Double { get }
 
   // Methods
-  func submitFrame(pointer: UInt64, runDepth: Bool, runHands: Bool) throws -> Void
+  func submitFrame(pointer: UInt64, orientationDegrees: Double, runDepth: Bool, runHands: Bool) throws -> Void
   func getDepthResult() throws -> DepthResult
   func getHandResult() throws -> HandResult
   func setControls(controls: LightControls) throws -> Void

@@ -20,6 +20,10 @@ export interface DepthResult {
   high: number
   /** Inference wall time in milliseconds (for the HUD). */
   inferenceTimeMs: number
+  /** Preprocessing (crop/scale) part of {@linkcode inferenceTimeMs}. */
+  prepTimeMs: number
+  /** Pure CoreML prediction part of {@linkcode inferenceTimeMs}. */
+  predictTimeMs: number
   /** The raw Float32 disparity values. */
   data: ArrayBuffer
 }

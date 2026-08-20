@@ -18,6 +18,13 @@ Pod::Spec.new do |s|
 
   s.frameworks = ["CoreML", "Vision", "Accelerate", "CoreVideo", "ImageIO", "UniformTypeIdentifiers"]
 
+  # The per-frame pixel loops (f16 conversion, percentile histogram) run for
+  # every depth inference; at -Onone (Debug) they cost ~17ms/frame, optimized
+  # <1ms - so keep this pod optimized even in Debug builds.
+  s.pod_target_xcconfig = {
+    "SWIFT_OPTIMIZATION_LEVEL" => "-O",
+  }
+
   load 'nitrogen/generated/ios/NitroLightNative+autolinking.rb'
   add_nitrogen_files(s)
 end

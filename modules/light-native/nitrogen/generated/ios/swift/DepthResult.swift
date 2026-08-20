@@ -18,8 +18,8 @@ public extension DepthResult {
   /**
    * Create a new instance of `DepthResult`.
    */
-  init(seq: Double, width: Double, height: Double, low: Double, high: Double, inferenceTimeMs: Double, data: ArrayBuffer) {
-    self.init(seq, width, height, low, high, inferenceTimeMs, data.getArrayBuffer())
+  init(seq: Double, width: Double, height: Double, low: Double, high: Double, inferenceTimeMs: Double, prepTimeMs: Double, predictTimeMs: Double, data: ArrayBuffer) {
+    self.init(seq, width, height, low, high, inferenceTimeMs, prepTimeMs, predictTimeMs, data.getArrayBuffer())
   }
 
   @inline(__always)
@@ -50,6 +50,16 @@ public extension DepthResult {
   @inline(__always)
   var inferenceTimeMs: Double {
     return self.__inferenceTimeMs
+  }
+  
+  @inline(__always)
+  var prepTimeMs: Double {
+    return self.__prepTimeMs
+  }
+  
+  @inline(__always)
+  var predictTimeMs: Double {
+    return self.__predictTimeMs
   }
   
   @inline(__always)
