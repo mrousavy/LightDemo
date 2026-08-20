@@ -135,13 +135,6 @@ open class HybridLightPipelineSpec_cxx {
       return self.__implementation.depthHeight
     }
   }
-  
-  public final var lastFaceRollDegrees: Double {
-    @inline(__always)
-    get {
-      return self.__implementation.lastFaceRollDegrees
-    }
-  }
 
   // Methods
   @inline(__always)

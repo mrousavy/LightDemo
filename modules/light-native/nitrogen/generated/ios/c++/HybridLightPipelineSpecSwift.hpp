@@ -84,9 +84,6 @@ namespace margelo::nitro::lightnative {
     inline double getDepthHeight() noexcept override {
       return _swiftPart.getDepthHeight();
     }
-    inline double getLastFaceRollDegrees() noexcept override {
-      return _swiftPart.getLastFaceRollDegrees();
-    }
 
   public:
     // Methods

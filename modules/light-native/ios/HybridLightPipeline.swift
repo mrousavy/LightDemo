@@ -67,26 +67,11 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private var handSeq: Int = -1
   private var latestHand: HandResult
 
-  // Face-based orientation auto-calibration (see spec docs). The scan runs
-  // on its own low-priority queue: it is auxiliary calibration data (not
-  // per-frame-coherent like depth/hands), and running it inline caused a
-  // ~5-10ms frame-time spike every few seconds.
-  private let orientationScanQueue = DispatchQueue(label: "light.orientation", qos: .utility)
-  private var orientationScanInFlight = false
-  private var orientationScanCountdown = 0
-  private var lastRollDeg: Double = -999
-
   private var controls: LightControls
   private var status: LightStatus
 
   var depthWidth: Double { Double(modelWidth) }
   var depthHeight: Double { Double(modelHeight) }
-  var lastFaceRollDegrees: Double {
-    lock.lock()
-    defer { lock.unlock() }
-    return lastRollDeg
-  }
-
   init(model: MLModel, inputWidth: Int, inputHeight: Int) throws {
     self.mlModel = model
     guard let inputName = model.modelDescription.inputDescriptionsByName.first(where: {
@@ -164,29 +149,6 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       // hand landmarks come back directly in the shared crop space - and
       // Vision runs on 392x392 instead of the full camera frame.
       detectHands(onPreparedInput: input)
-    }
-
-    // Orientation auto-calibration: measure the face roll on the RAW buffer
-    // (the prepared input is already uprighted, so it is useless for this)
-    // every ~4s - gimbal cameras can physically rotate mid-session.
-    orientationScanCountdown -= 1
-    if orientationScanCountdown <= 0 {
-      lock.lock()
-      let busy = orientationScanInFlight
-      let seen = lastRollDeg > -900
-      if !busy { orientationScanInFlight = true }
-      lock.unlock()
-      if !busy {
-        // Capturing the CVPixelBuffer retains it past the frame's dispose.
-        orientationScanQueue.async { [weak self] in
-          guard let self else { return }
-          self.scanOrientation(on: pixelBuffer)
-          self.lock.lock()
-          self.orientationScanInFlight = false
-          self.lock.unlock()
-        }
-      }
-      orientationScanCountdown = seen ? 120 : 30
     }
 
     return try getDepthResult()
@@ -392,22 +354,6 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   }
 
   // MARK: - Hands
-
-  /// Measure the in-plane rotation of a face in the RAW buffer. Vision's
-  /// face detector is rotation-invariant, so the observation's `roll` angle
-  /// tells us directly how the buffer content is rotated.
-  private func scanOrientation(on pixelBuffer: CVPixelBuffer) {
-    let request = VNDetectFaceRectanglesRequest()
-    let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
-    try? handler.perform([request])
-    guard let face = request.results?.max(by: { $0.confidence < $1.confidence }),
-          face.confidence > 0.5,
-          let roll = face.roll?.doubleValue
-    else { return }
-    lock.lock()
-    lastRollDeg = roll * 180 / .pi
-    lock.unlock()
-  }
 
   /// Synchronous hand-pose detection on the prepared (upright, cropped)
   /// model input buffer - landmarks come back directly in crop space.

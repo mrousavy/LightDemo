@@ -22,17 +22,6 @@ export interface LightPipeline
   readonly depthWidth: number
   /** Height of the depth model's input/output in pixels. */
   readonly depthHeight: number
-  /**
-   * The in-plane rotation (roll, degrees) of the most recently detected face
-   * in the RAW buffer, measured periodically on the hand-detection queue, or
-   * -999 while no face has been seen. Modern Vision face detection is
-   * rotation-invariant, so a "which orientation finds a face" scan cannot
-   * discriminate - but the observation's roll angle directly tells us how
-   * the buffer is rotated. The JS side maps this to a display rotation
-   * (gimbal cameras can physically rotate mid-session, so it re-measures
-   * continuously).
-   */
-  readonly lastFaceRollDegrees: number
 
   /**
    * Analyze one camera frame FULLY SYNCHRONOUSLY on the calling thread:

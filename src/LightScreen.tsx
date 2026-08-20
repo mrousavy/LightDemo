@@ -42,10 +42,11 @@ const LIGHT_Z_MAX = 1.65
 
 const DEFAULT_CONTROLS: LightControls = {
   mirror: true,
-  // Auto: face-roll-based calibration (sign validated live). With a
-  // landscape connection the buffer should be upright (rotation 0), and
-  // auto adapts if the gimbal ever changes orientation.
-  rotationOverride: -1,
+  // Hardcoded upright rotation for the Insta360 Link 2 Pro's current
+  // mounting (verified visually). Cycle the Rot button if it changes;
+  // 'auto' falls back to VisionCamera's tag, which is wrong for external
+  // cameras (derived from the connection's default portrait orientation).
+  rotationOverride: 270,
   mode: 0,
   // Moodier than the TypeGPU defaults (intensity 3.0 / exposure 0.5): a dim
   // base scene with a bright light reads far more dramatic on a well-lit
@@ -421,21 +422,13 @@ function LightView() {
       // Rotation needed to display the buffer upright. Applied identically to
       // the camera texture (Dawn), the depth-model input (CoreImage) and the
       // hand detector (Vision) so all three stay in the same display space.
+      // The default comes from DEFAULT_CONTROLS (hardcoded for this camera's
+      // mounting - VisionCamera's orientation tag is wrong for external
+      // cameras); cycle the Rot button if the gimbal changes. 'auto' (-1)
+      // falls back to the tag.
       let rotationDeg: 0 | 90 | 180 | 270 = 0
-      const faceRoll = nitro.lastFaceRollDegrees
       if (controlsNow.rotationOverride >= 0) {
         rotationDeg = controlsNow.rotationOverride as 0 | 90 | 180 | 270
-      } else if (faceRoll > -900) {
-        // Face-calibrated orientation: the roll of a detected face in the
-        // raw buffer tells us how the buffer is rotated (the VisionCamera
-        // tag comes from the connection's default portrait videoOrientation
-        // and is wrong for external/gimbal cameras). ROLL_SIGN converts
-        // Vision's y-up roll into our display-rotation direction. Validated
-        // live: roll=-90 measured while the verified rotation was 270.
-        const ROLL_SIGN = 1
-        const quantized =
-          ((Math.round((ROLL_SIGN * faceRoll) / 90) * 90) % 360 + 360) % 360
-        rotationDeg = quantized as 0 | 90 | 180 | 270
       } else if (frame.orientation === 'right') rotationDeg = 90
       else if (frame.orientation === 'down') rotationDeg = 180
       else if (frame.orientation === 'left') rotationDeg = 270
@@ -783,7 +776,7 @@ function LightView() {
                 `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
                 `tracked=${hand.tracked} pinch=${hand.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
-                `grabbed=${box.grabbed} rot=${rotationDeg} roll=${faceRoll.toFixed(0)} ` +
+                `grabbed=${box.grabbed} rot=${rotationDeg} ` +
                 `handSize=${hand.handSize.toFixed(3)}`,
             )
           }
