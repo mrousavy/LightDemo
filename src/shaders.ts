@@ -23,6 +23,14 @@ const MOTION_ALPHA = 0.92;
 const MOTION_LOW = 0.02;
 const MOTION_HIGH = 0.09;
 
+// Joint bilateral upsampling (depthPrepare): gaussian sharpness terms.
+// JBU_SPATIAL = 1/(2*sigma^2) with sigma ~0.9 model texels; JBU_RANGE with
+// sigma ~0.09 in luma; JBU_FLOOR keeps a bilinear fallback where the camera
+// offers no contrast so flat regions degrade to a plain gaussian upsample.
+const JBU_SPATIAL = 0.62;
+const JBU_RANGE = 60.0;
+const JBU_FLOOR = 0.02;
+
 const GRADIENT_RADIUS = 7;
 const GRADIENT_LIMIT = 0.009;
 const GRADIENT_NOISE_ENERGY = 0.0003 * 0.0003;
@@ -91,13 +99,15 @@ const SHADOW_GAIN = 2.5;
 const SHADOW_FRONT_FADE = 0.2;
 `;
 
-// One shared uniform for both compute passes. 32 bytes.
+// One shared uniform for both compute passes. 48 bytes.
 const COMPUTE_PARAMS = /* wgsl */ `
 struct ComputeParams {
-  size: vec2u,     // depth map size in texels
-  reset: u32,      // 1 = skip EMAs (first frame after camera change)
-  mirror: u32,     // 1 = surface texture written mirrored in x
-  range: vec2f,    // stabilized (low, high) disparity range
+  size: vec2u,        // FIELD size in texels
+  reset: u32,         // 1 = skip EMAs (first frame after camera change)
+  mirror: u32,        // 1 = surface texture written mirrored in x
+  range: vec2f,       // stabilized (low, high) disparity range
+  cropScale: vec2f,   // model-crop uv -> oriented camera uv (no mirror)
+  cropOffset: vec2f,
   _pad: vec2f,
 }
 `;
@@ -114,6 +124,13 @@ ${COMPUTE_PARAMS}
 @group(0) @binding(1) var disparityTex: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> history: array<f32>;
 @group(0) @binding(3) var disparitySampler: sampler;
+@group(0) @binding(4) var cameraTex: texture_external;
+
+fn cameraLuma(uv: vec2f) -> f32 {
+  let c = textureSampleBaseClampToEdge(
+    cameraTex, disparitySampler, params.cropOffset + uv * params.cropScale).rgb;
+  return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+}
 
 @compute @workgroup_size(64)
 fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
@@ -122,11 +139,38 @@ fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
   let coord = vec2i(i32(index % params.size.x), i32(index / params.size.x));
   let low = params.range.x;
   let span = max(params.range.y - low, 0.001);
-  // params.size is the FIELD size; bilinearly upsample the model output.
-  let uv = (vec2f(coord) + 0.5) / vec2f(params.size);
-  let disp = textureSampleLevel(disparityTex, disparitySampler, uv, 0.0).r;
+  let fieldUv = (vec2f(coord) + 0.5) / vec2f(params.size);
+  // Joint bilateral upsampling: reconstruct the model-resolution disparity
+  // at field resolution GUIDED BY THE CAMERA IMAGE. Plain bilinear smears
+  // depth edges across multi-pixel ramps that the AO/shadow terms amplify
+  // into blocky fringes at silhouettes (arms, head). Weighting each model
+  // texel by how much its camera pixel resembles ours snaps depth edges to
+  // IMAGE edges - sub-model-texel silhouettes from the same model output.
+  let modelSize = vec2f(params.size) / f32(FIELD_SCALE);
+  let mp = fieldUv * modelSize - 0.5;
+  let baseTexel = floor(mp);
+  let centerLuma = cameraLuma(fieldUv);
+  var accum = 0.0;
+  var weightSum = 0.0;
+  for (var dy = -1; dy <= 2; dy++) {
+    for (var dx = -1; dx <= 2; dx++) {
+      let tap = baseTexel + vec2f(f32(dx), f32(dy));
+      let tapUv = (tap + vec2f(0.5)) / modelSize;
+      let disp = textureSampleLevel(disparityTex, disparitySampler, tapUv, 0.0).r;
+      if (disp != disp) { continue; }
+      let toTap = mp - tap;
+      let spatial = exp(-dot(toTap, toTap) * JBU_SPATIAL);
+      let lumaDelta = cameraLuma(tapUv) - centerLuma;
+      let similarity = exp(-lumaDelta * lumaDelta * JBU_RANGE) + JBU_FLOOR;
+      let w = spatial * similarity;
+      accum += disp * w;
+      weightSum += w;
+    }
+  }
   var normalized = 0.0;
-  if (disp == disp) { normalized = saturate((disp - low) / span); }
+  if (weightSum > 0.0) {
+    normalized = saturate((accum / weightSum - low) / span);
+  }
   var filtered = normalized;
   if (params.reset == 0u) {
     let previous = history[index];

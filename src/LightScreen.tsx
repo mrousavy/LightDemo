@@ -222,7 +222,7 @@ function LightView() {
 
     const sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' })
     const computeParamsBuffer = device.createBuffer({
-      size: 32,
+      size: 48,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     })
     const relightParamsBuffer = device.createBuffer({
@@ -407,7 +407,6 @@ function LightView() {
       depthPtr: 0n as bigint,
       depthMemory: null as GPUSharedTextureMemory | null,
       depthTexture: null as GPUTexture | null,
-      depthBindGroup: null as GPUBindGroup | null,
     }),
     [],
   )
@@ -458,6 +457,29 @@ function LightView() {
           const dispW = rotated ? videoFrame.height : videoFrame.width
           const dispH = rotated ? videoFrame.width : videoFrame.height
 
+          // Center-crop mapping from the model's aspect into the oriented
+          // camera frame - shared by the JBU depth upsample (no mirror) and
+          // the relight camera fetch (mirror applied in-shader).
+          const modelAspect = pipeline.depthW / pipeline.depthH
+          const frameAspect = dispW / dispH
+          let cropW = 1
+          let cropH = 1
+          if (frameAspect > modelAspect) {
+            cropW = modelAspect / frameAspect
+          } else {
+            cropH = frameAspect / modelAspect
+          }
+          const cropOffX = (1 - cropW) / 2
+          const cropOffY = (1 - cropH) / 2
+
+          // Imported once per frame (external textures expire each frame),
+          // used by BOTH the JBU guide fetch and the relight pass.
+          const externalTexture = device.importExternalTexture({
+            source: videoFrame,
+            label: 'camera-frame',
+            rotation: rotationDeg,
+          })
+
           const encoder = device.createCommandEncoder()
 
           // --- depth + hands: fully synchronous, same-frame (async results
@@ -480,7 +502,7 @@ function LightView() {
               box.rangeLow = box.rangeLow + (depth.low - box.rangeLow) * 0.12
               box.rangeHigh = box.rangeHigh + (depth.high - box.rangeHigh) * 0.12
             }
-            const computeParams = new ArrayBuffer(32)
+            const computeParams = new ArrayBuffer(48)
             const cpU32 = new Uint32Array(computeParams)
             const cpF32 = new Float32Array(computeParams)
             cpU32[0] = pipeline.fieldW
@@ -489,6 +511,10 @@ function LightView() {
             cpU32[3] = mirrored ? 1 : 0
             cpF32[4] = box.rangeLow
             cpF32[5] = box.rangeHigh
+            cpF32[6] = cropW
+            cpF32[7] = cropH
+            cpF32[8] = cropOffX
+            cpF32[9] = cropOffY
             device.queue.writeBuffer(pipeline.computeParamsBuffer, 0, computeParams)
 
             // Zero-copy: CoreML writes depth into ONE persistent IOSurface
@@ -504,22 +530,25 @@ function LightView() {
               box.depthMemory = memory
               box.depthTexture = texture
               box.depthPtr = depth.surfacePointer
-              box.depthBindGroup = device.createBindGroup({
-                layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
-                entries: [
-                  { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
-                  { binding: 1, resource: texture.createView() },
-                  { binding: 2, resource: { buffer: pipeline.historyBuffer } },
-                  { binding: 3, resource: pipeline.sampler },
-                ],
-              })
             }
+            // Per frame: the bind group holds the expiring external texture
+            // (the JBU guide image), so it cannot be cached.
+            const depthBindGroup = device.createBindGroup({
+              layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
+              entries: [
+                { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
+                { binding: 1, resource: box.depthTexture!.createView() },
+                { binding: 2, resource: { buffer: pipeline.historyBuffer } },
+                { binding: 3, resource: pipeline.sampler },
+                { binding: 4, resource: externalTexture },
+              ],
+            })
             box.depthMemory!.beginAccess(box.depthTexture!, true)
             depthAccessed = true
 
             const compute = encoder.beginComputePass()
             compute.setPipeline(pipeline.depthPreparePipeline)
-            compute.setBindGroup(0, box.depthBindGroup!)
+            compute.setBindGroup(0, depthBindGroup)
             compute.dispatchWorkgroups(Math.ceil((pipeline.fieldW * pipeline.fieldH) / 64))
             compute.setPipeline(pipeline.surfacePipeline)
             compute.setBindGroup(0, pipeline.surfaceBindGroup)
@@ -776,15 +805,6 @@ function LightView() {
           }
 
           // --- relight uniforms ---
-          const modelAspect = pipeline.depthW / pipeline.depthH
-          const frameAspect = dispW / dispH
-          let cropW = 1
-          let cropH = 1
-          if (frameAspect > modelAspect) {
-            cropW = modelAspect / frameAspect
-          } else {
-            cropH = frameAspect / modelAspect
-          }
           const relightParams = new ArrayBuffer(96)
           const rpF32 = new Float32Array(relightParams)
           const rpU32 = new Uint32Array(relightParams)
@@ -808,16 +828,11 @@ function LightView() {
           rpF32[15] = pipeline.depthW / pipeline.depthH
           rpF32[16] = cropW
           rpF32[17] = cropH
-          rpF32[18] = (1 - cropW) / 2
-          rpF32[19] = (1 - cropH) / 2
+          rpF32[18] = cropOffX
+          rpF32[19] = cropOffY
           rpF32[20] = (renderStart / 1000) % 1000
           device.queue.writeBuffer(pipeline.relightParamsBuffer, 0, relightParams)
 
-          const externalTexture = device.importExternalTexture({
-            source: videoFrame,
-            label: 'camera-frame',
-            rotation: rotationDeg,
-          })
           const bindGroup = device.createBindGroup({
             layout: pipeline.relightPipeline.getBindGroupLayout(0),
             entries: [
