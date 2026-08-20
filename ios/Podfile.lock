@@ -40,6 +40,7 @@ PODS:
     - Yoga
   - NitroLightNative (0.1.0):
     - NitroModules
+    - VisionCamera
   - NitroModules (0.37.0):
     - hermes-engine
     - RCTRequired
@@ -2165,7 +2166,7 @@ SPEC CHECKSUMS:
   glog: 3cf7cb46f743c4bc758ae3e6d9c15bd1b4cfd6d4
   hermes-engine: 6a26e94b4a974cbadc751eed9caa12624c38f226
   NitroImage: c36a60d5febe30a6794978cd30c9e9f92392ff95
-  NitroLightNative: 4b29d8365a1e51e1bd1c43c066754deaaf6a17b0
+  NitroLightNative: 51d064577af92272f5b9244555c42a3a613e909a
   NitroModules: b878677ec4c260bd821ed4a66703979538705f2e
   RCT-Folly: 82921e585c0400eda46fac1068297aa9dfb035e4
   RCTDeprecation: 6d66040b74f4be203495adda55b49c1a25190291
