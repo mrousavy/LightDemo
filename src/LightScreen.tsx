@@ -389,6 +389,7 @@ function LightView() {
       lightY: 0.34,
       lightZ: 0.25,
       bulbScale: 1,
+      grabbedHandSize: 0,
       grabbed: false,
       pinchFrames: 0,
       releaseFrames: 0,
@@ -718,6 +719,9 @@ function LightView() {
                   // march use. No hand-size heuristics, no envelope: where
                   // the depth map says the fingers are is where the light
                   // goes.
+                  if (locked.h.handSize > 0) {
+                    box.grabbedHandSize = locked.h.handSize
+                  }
                   const nearest = locked.h.disparity >= 0
                     ? locked.h.disparity
                     : nitro.sampleDepthMax([
@@ -820,11 +824,17 @@ function LightView() {
             const BULB_CAMERA_Z = 0.85
             let sizeSource = 0
             if (controlsNow.handControl) {
-              if (hand.hand1.tracked && hand.hand1.handSize > sizeSource) {
-                sizeSource = hand.hand1.handSize
-              }
-              if (hand.hand2.tracked && hand.hand2.handSize > sizeSource) {
-                sizeSource = hand.hand2.handSize
+              if (box.grabbed) {
+                // Only the hand HOLDING the light may size it - an open
+                // second hand moving toward the camera must not inflate it.
+                sizeSource = box.grabbedHandSize
+              } else {
+                if (hand.hand1.tracked && hand.hand1.handSize > sizeSource) {
+                  sizeSource = hand.hand1.handSize
+                }
+                if (hand.hand2.tracked && hand.hand2.handSize > sizeSource) {
+                  sizeSource = hand.hand2.handSize
+                }
               }
             }
             const targetScale = sizeSource > 0
