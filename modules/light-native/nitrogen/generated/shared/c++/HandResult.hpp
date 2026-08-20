@@ -28,9 +28,10 @@
 #error NitroModules cannot be found! Are you sure you installed NitroModules properly?
 #endif
 
+// Forward declaration of `TrackedHand` to properly resolve imports.
+namespace margelo::nitro::lightnative { struct TrackedHand; }
 
-
-
+#include "TrackedHand.hpp"
 
 namespace margelo::nitro::lightnative {
 
@@ -40,21 +41,13 @@ namespace margelo::nitro::lightnative {
   struct HandResult final {
   public:
     double seq     SWIFT_PRIVATE;
-    bool tracked     SWIFT_PRIVATE;
-    double thumbX     SWIFT_PRIVATE;
-    double thumbY     SWIFT_PRIVATE;
-    double indexX     SWIFT_PRIVATE;
-    double indexY     SWIFT_PRIVATE;
-    double midX     SWIFT_PRIVATE;
-    double midY     SWIFT_PRIVATE;
-    double pinchRatio     SWIFT_PRIVATE;
-    double handSize     SWIFT_PRIVATE;
-    double confidence     SWIFT_PRIVATE;
+    TrackedHand hand1     SWIFT_PRIVATE;
+    TrackedHand hand2     SWIFT_PRIVATE;
     double detectionTimeMs     SWIFT_PRIVATE;
 
   public:
     HandResult() = default;
-    explicit HandResult(double seq, bool tracked, double thumbX, double thumbY, double indexX, double indexY, double midX, double midY, double pinchRatio, double handSize, double confidence, double detectionTimeMs): seq(seq), tracked(tracked), thumbX(thumbX), thumbY(thumbY), indexX(indexX), indexY(indexY), midX(midX), midY(midY), pinchRatio(pinchRatio), handSize(handSize), confidence(confidence), detectionTimeMs(detectionTimeMs) {}
+    explicit HandResult(double seq, TrackedHand hand1, TrackedHand hand2, double detectionTimeMs): seq(seq), hand1(hand1), hand2(hand2), detectionTimeMs(detectionTimeMs) {}
 
   public:
     friend bool operator==(const HandResult& lhs, const HandResult& rhs) = default;
@@ -71,32 +64,16 @@ namespace margelo::nitro {
       jsi::Object obj = arg.asObject(runtime);
       return margelo::nitro::lightnative::HandResult(
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "seq"))),
-        JSIConverter<bool>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "tracked"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "thumbX"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "thumbY"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "indexX"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "indexY"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midX"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midY"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "pinchRatio"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "handSize"))),
-        JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "confidence"))),
+        JSIConverter<margelo::nitro::lightnative::TrackedHand>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "hand1"))),
+        JSIConverter<margelo::nitro::lightnative::TrackedHand>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "hand2"))),
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "detectionTimeMs")))
       );
     }
     static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::lightnative::HandResult& arg) {
       jsi::Object obj(runtime);
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "seq"), JSIConverter<double>::toJSI(runtime, arg.seq));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "tracked"), JSIConverter<bool>::toJSI(runtime, arg.tracked));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "thumbX"), JSIConverter<double>::toJSI(runtime, arg.thumbX));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "thumbY"), JSIConverter<double>::toJSI(runtime, arg.thumbY));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "indexX"), JSIConverter<double>::toJSI(runtime, arg.indexX));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "indexY"), JSIConverter<double>::toJSI(runtime, arg.indexY));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "midX"), JSIConverter<double>::toJSI(runtime, arg.midX));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "midY"), JSIConverter<double>::toJSI(runtime, arg.midY));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "pinchRatio"), JSIConverter<double>::toJSI(runtime, arg.pinchRatio));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "handSize"), JSIConverter<double>::toJSI(runtime, arg.handSize));
-      obj.setProperty(runtime, PropNameIDCache::get(runtime, "confidence"), JSIConverter<double>::toJSI(runtime, arg.confidence));
+      obj.setProperty(runtime, PropNameIDCache::get(runtime, "hand1"), JSIConverter<margelo::nitro::lightnative::TrackedHand>::toJSI(runtime, arg.hand1));
+      obj.setProperty(runtime, PropNameIDCache::get(runtime, "hand2"), JSIConverter<margelo::nitro::lightnative::TrackedHand>::toJSI(runtime, arg.hand2));
       obj.setProperty(runtime, PropNameIDCache::get(runtime, "detectionTimeMs"), JSIConverter<double>::toJSI(runtime, arg.detectionTimeMs));
       return obj;
     }
@@ -109,16 +86,8 @@ namespace margelo::nitro {
         return false;
       }
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "seq")))) return false;
-      if (!JSIConverter<bool>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "tracked")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "thumbX")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "thumbY")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "indexX")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "indexY")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midX")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "midY")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "pinchRatio")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "handSize")))) return false;
-      if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "confidence")))) return false;
+      if (!JSIConverter<margelo::nitro::lightnative::TrackedHand>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "hand1")))) return false;
+      if (!JSIConverter<margelo::nitro::lightnative::TrackedHand>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "hand2")))) return false;
       if (!JSIConverter<double>::canConvert(runtime, obj.getProperty(runtime, PropNameIDCache::get(runtime, "detectionTimeMs")))) return false;
       return true;
     }

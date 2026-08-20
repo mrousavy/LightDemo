@@ -22,6 +22,8 @@ namespace margelo::nitro::lightnative { class HybridLightPipelineSpec; }
 namespace margelo::nitro::lightnative { struct LightControls; }
 // Forward declaration of `LightStatus` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct LightStatus; }
+// Forward declaration of `TrackedHand` to properly resolve imports.
+namespace margelo::nitro::lightnative { struct TrackedHand; }
 
 // Include C++ defined types
 #include "DepthResult.hpp"
@@ -30,6 +32,7 @@ namespace margelo::nitro::lightnative { struct LightStatus; }
 #include "HybridLightPipelineSpec.hpp"
 #include "LightControls.hpp"
 #include "LightStatus.hpp"
+#include "TrackedHand.hpp"
 #include <NitroModules/ArrayBuffer.hpp>
 #include <NitroModules/Promise.hpp>
 #include <NitroModules/Result.hpp>

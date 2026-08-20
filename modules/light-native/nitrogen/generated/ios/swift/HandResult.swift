@@ -18,8 +18,8 @@ public extension HandResult {
   /**
    * Create a new instance of `HandResult`.
    */
-  init(seq: Double, tracked: Bool, thumbX: Double, thumbY: Double, indexX: Double, indexY: Double, midX: Double, midY: Double, pinchRatio: Double, handSize: Double, confidence: Double, detectionTimeMs: Double) {
-    self.init(seq, tracked, thumbX, thumbY, indexX, indexY, midX, midY, pinchRatio, handSize, confidence, detectionTimeMs)
+  init(seq: Double, hand1: TrackedHand, hand2: TrackedHand, detectionTimeMs: Double) {
+    self.init(seq, hand1, hand2, detectionTimeMs)
   }
 
   @inline(__always)
@@ -28,53 +28,13 @@ public extension HandResult {
   }
   
   @inline(__always)
-  var tracked: Bool {
-    return self.__tracked
+  var hand1: TrackedHand {
+    return self.__hand1
   }
   
   @inline(__always)
-  var thumbX: Double {
-    return self.__thumbX
-  }
-  
-  @inline(__always)
-  var thumbY: Double {
-    return self.__thumbY
-  }
-  
-  @inline(__always)
-  var indexX: Double {
-    return self.__indexX
-  }
-  
-  @inline(__always)
-  var indexY: Double {
-    return self.__indexY
-  }
-  
-  @inline(__always)
-  var midX: Double {
-    return self.__midX
-  }
-  
-  @inline(__always)
-  var midY: Double {
-    return self.__midY
-  }
-  
-  @inline(__always)
-  var pinchRatio: Double {
-    return self.__pinchRatio
-  }
-  
-  @inline(__always)
-  var handSize: Double {
-    return self.__handSize
-  }
-  
-  @inline(__always)
-  var confidence: Double {
-    return self.__confidence
+  var hand2: TrackedHand {
+    return self.__hand2
   }
   
   @inline(__always)

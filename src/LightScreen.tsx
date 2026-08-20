@@ -533,52 +533,49 @@ function LightView() {
           const hand = nitro.getHandResult()
           if (controlsNow.handControl && hand.seq >= 0 && hand.seq !== box.lastHandSeq) {
             box.lastHandSeq = hand.seq
-            // Gate low-confidence detections, and reject single-frame
-            // midpoint teleports (Vision jitters under motion blur, which
-            // previously made the grabbed light jump across the screen).
-            const rawX = mirrored ? 1 - hand.midX : hand.midX
-            const rawY = hand.midY
-            const jump = box.handValid
-              ? Math.hypot(rawX - box.handX, rawY - box.handY)
-              : 0
-            const isOutlier = box.handValid && jump > 0.3 && box.outlierCount < 3
-            const usable = hand.tracked && hand.confidence > 0.45 && !isOutlier
-            if (hand.tracked && isOutlier) box.outlierCount += 1
-            if (usable) {
-              box.outlierCount = 0
-              if (box.handValid) {
-                box.handX += (rawX - box.handX) * 0.6
-                box.handY += (rawY - box.handY) * 0.6
-                box.pinchSmoothed += (hand.pinchRatio - box.pinchSmoothed) * 0.5
-              } else {
-                box.handX = rawX
-                box.handY = rawY
-                box.pinchSmoothed = hand.pinchRatio
-                box.handValid = true
-              }
-              const handX = box.handX
-              const handY = box.handY
-              const isPinching = box.pinchSmoothed < 0.28
-              const isOpen = box.pinchSmoothed > 0.42
-              // Hover-steering (like the TypeGPU demo's pointer): a visible,
-              // non-pinching hand gently attracts the light, making the
-              // pinch-grab easy to initiate.
-              if (!box.grabbed && !controlsNow.touchActive && !isPinching) {
-                box.everControlled = true
-                box.lightX += (handX - box.lightX) * 0.06
-                box.lightY += (handY - box.lightY) * 0.06
-                freshHandUpdate = true
-              }
+            // Up to two hands; slot order is unstable across frames, so
+            // continuity is matched by proximity, never by slot index.
+            const hands = []
+            if (hand.hand1.tracked && hand.hand1.confidence > 0.45) hands.push(hand.hand1)
+            if (hand.hand2.tracked && hand.hand2.confidence > 0.45) hands.push(hand.hand2)
+            if (hands.length > 0) {
               if (!box.grabbed) {
-                const dx = handX - box.lightX
-                const dy = handY - box.lightY
-                const near = dx * dx + dy * dy < 0.3 * 0.3
-                if (isPinching && near) {
+                // Hover-steering (like the TypeGPU demo's pointer): drift
+                // toward the visible hand - or the CENTER between both
+                // hands when two are visible.
+                let cx = 0
+                let cy = 0
+                for (const h of hands) {
+                  cx += mirrored ? 1 - h.midX : h.midX
+                  cy += h.midY
+                }
+                cx /= hands.length
+                cy /= hands.length
+                if (!controlsNow.touchActive) {
+                  box.everControlled = true
+                  box.lightX += (cx - box.lightX) * 0.06
+                  box.lightY += (cy - box.lightY) * 0.06
+                  freshHandUpdate = true
+                }
+                // Engage: ANY pinching hand near the light locks the grab
+                // onto that hand.
+                let engaging = false
+                for (const h of hands) {
+                  const hx = mirrored ? 1 - h.midX : h.midX
+                  const dx = hx - box.lightX
+                  const dy = h.midY - box.lightY
+                  if (h.pinchRatio < 0.28 && dx * dx + dy * dy < 0.3 * 0.3) {
+                    engaging = true
+                    break
+                  }
+                }
+                if (engaging) {
                   box.pinchFrames += 1
                   if (box.pinchFrames >= 2) {
                     box.grabbed = true
                     box.everControlled = true
                     box.releaseFrames = 0
+                    box.handValid = false
                     // Re-reference the proximity control at each grab: z
                     // moves relative to the hand's size at THIS grab.
                     box.grabRefSize = 0
@@ -588,19 +585,52 @@ function LightView() {
                   box.pinchFrames = 0
                 }
               } else {
-                if (isOpen) {
-                  box.releaseFrames += 1
-                  if (box.releaseFrames >= 2) {
-                    box.grabbed = false
-                    box.pinchFrames = 0
+                // Locked hand = whichever visible hand is closest to the
+                // light (we follow it, so it stays closest).
+                let locked = hands[0]
+                let bestDistance = Number.POSITIVE_INFINITY
+                for (const h of hands) {
+                  const hx = mirrored ? 1 - h.midX : h.midX
+                  const d = (hx - box.lightX) ** 2 + (h.midY - box.lightY) ** 2
+                  if (d < bestDistance) {
+                    bestDistance = d
+                    locked = h
                   }
-                } else {
-                  box.releaseFrames = 0
                 }
-                if (box.grabbed) {
-                  // Smoothly follow the pinch point.
-                  box.lightX += (handX - box.lightX) * 0.5
-                  box.lightY += (handY - box.lightY) * 0.5
+                const rawX = mirrored ? 1 - locked.midX : locked.midX
+                const rawY = locked.midY
+                // Reject single-frame teleports of the locked hand (Vision
+                // jitters under motion blur).
+                const jump = box.handValid
+                  ? Math.hypot(rawX - box.handX, rawY - box.handY)
+                  : 0
+                const isOutlier = box.handValid && jump > 0.3 && box.outlierCount < 3
+                if (isOutlier) {
+                  box.outlierCount += 1
+                } else {
+                  box.outlierCount = 0
+                  if (box.handValid) {
+                    box.handX += (rawX - box.handX) * 0.6
+                    box.handY += (rawY - box.handY) * 0.6
+                  } else {
+                    box.handX = rawX
+                    box.handY = rawY
+                    box.handValid = true
+                  }
+                  if (locked.pinchRatio > 0.42) {
+                    box.releaseFrames += 1
+                    if (box.releaseFrames >= 2) {
+                      box.grabbed = false
+                      box.pinchFrames = 0
+                    }
+                  } else {
+                    box.releaseFrames = 0
+                  }
+                }
+                if (box.grabbed && !isOutlier) {
+                  // Smoothly follow the locked pinch point.
+                  box.lightX += (box.handX - box.lightX) * 0.5
+                  box.lightY += (box.handY - box.lightY) * 0.5
                   freshHandUpdate = true
                   // Light depth = HYBRID of two signals, each doing what it
                   // is actually good at:
@@ -625,9 +655,9 @@ function LightView() {
                   //    farther pulls it deeper - intuitive at any seating
                   //    distance, no calibration constants.
                   const nearest = nitro.sampleDepthMax([
-                    hand.thumbX, hand.thumbY,
-                    hand.indexX, hand.indexY,
-                    hand.midX, hand.midY,
+                    locked.thumbX, locked.thumbY,
+                    locked.indexX, locked.indexY,
+                    locked.midX, locked.midY,
                   ])
                   if (nearest >= 0) {
                     const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
@@ -641,11 +671,11 @@ function LightView() {
                         ? zSample
                         : Math.max(zSample, box.zSceneEnvelope - 0.02)
                   }
-                  if (hand.handSize > 0) {
+                  if (locked.handSize > 0) {
                     box.handSizeSmoothed =
                       box.handSizeSmoothed <= 0
-                        ? hand.handSize
-                        : box.handSizeSmoothed + (hand.handSize - box.handSizeSmoothed) * 0.3
+                        ? locked.handSize
+                        : box.handSizeSmoothed + (locked.handSize - box.handSizeSmoothed) * 0.3
                     if (box.grabRefSize <= 0) box.grabRefSize = box.handSizeSmoothed
                   }
                   let sizeOffset = 0
@@ -662,7 +692,7 @@ function LightView() {
                   box.lightZ += (targetZ - box.lightZ) * 0.25
                 }
               }
-            } else if (!hand.tracked) {
+            } else {
               box.pinchFrames = 0
               box.handValid = false
               box.outlierCount = 0
@@ -822,10 +852,11 @@ function LightView() {
                 `render=${(now - renderStart).toFixed(1)}ms ` +
                 `depth#${depth.seq}=${depth.inferenceTimeMs.toFixed(0)}ms ` +
                 `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
-                `tracked=${hand.tracked} pinch=${hand.pinchRatio.toFixed(2)} ` +
+                `hands=${(hand.hand1.tracked ? 1 : 0) + (hand.hand2.tracked ? 1 : 0)} ` +
+                `pinch=${hand.hand1.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
                 `grabbed=${box.grabbed} rot=${rotationDeg} ` +
-                `handSize=${hand.handSize.toFixed(3)}`,
+                `handSize=${hand.hand1.handSize.toFixed(3)}`,
             )
           }
           if (box.frameCount % 15 === 0) {
@@ -843,8 +874,8 @@ function LightView() {
               lightX: box.lightX,
               lightY: box.lightY,
               lightZ: box.lightZ,
-              handTracked: hand.tracked,
-              pinchRatio: hand.pinchRatio,
+              handTracked: hand.hand1.tracked || hand.hand2.tracked,
+              pinchRatio: Math.min(hand.hand1.pinchRatio, hand.hand2.pinchRatio),
               grabbed: box.grabbed,
               depthSeq: depth.seq,
               handSeq: hand.seq,

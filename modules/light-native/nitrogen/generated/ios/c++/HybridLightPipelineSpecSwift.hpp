@@ -18,6 +18,8 @@ namespace margelo::nitro::lightnative { struct DepthResult; }
 namespace margelo::nitro::camera { class HybridFrameSpec; }
 // Forward declaration of `HandResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct HandResult; }
+// Forward declaration of `TrackedHand` to properly resolve imports.
+namespace margelo::nitro::lightnative { struct TrackedHand; }
 // Forward declaration of `LightControls` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct LightControls; }
 // Forward declaration of `LightStatus` to properly resolve imports.
@@ -27,6 +29,7 @@ namespace margelo::nitro::lightnative { struct LightStatus; }
 #include <memory>
 #include <VisionCamera/HybridFrameSpec.hpp>
 #include "HandResult.hpp"
+#include "TrackedHand.hpp"
 #include <vector>
 #include "LightControls.hpp"
 #include <string>

@@ -41,7 +41,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   // video frames and avoids the per-frame handler setup cost.
   private let handRequest: VNDetectHumanHandPoseRequest = {
     let request = VNDetectHumanHandPoseRequest()
-    request.maximumHandCount = 1
+    request.maximumHandCount = 2
     return request
   }()
   private let sequenceHandler = VNSequenceRequestHandler()
@@ -109,9 +109,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     self.predictionOptions = options
 
     self.latestHand = HandResult(
-      seq: -1, tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
-      midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0,
-      detectionTimeMs: 0)
+      seq: -1, hand1: Self.emptyHand, hand2: Self.emptyHand, detectionTimeMs: 0)
     self.controls = LightControls(
       mode: 0, intensity: 3.0, exposure: 0.5, relief: 0.85, specular: 0.22,
       shadow: 0.7, occlusion: 0.55, colorR: 1.0, colorG: 0.83, colorB: 0.6,
@@ -355,65 +353,58 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
   // MARK: - Hands
 
-  /// Synchronous hand-pose detection on the prepared (upright, cropped)
-  /// model input buffer - landmarks come back directly in crop space.
+  private static let emptyHand = TrackedHand(
+    tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
+    midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0)
+
+  /// Extract a TrackedHand from a Vision observation. The input already IS
+  /// the upright center crop, so only the y-flip is needed (Vision uses a
+  /// bottom-left origin).
+  private static func extractHand(_ hand: VNHumanHandPoseObservation) -> TrackedHand? {
+    guard let thumb = try? hand.recognizedPoint(.thumbTip),
+          let index = try? hand.recognizedPoint(.indexTip),
+          let wrist = try? hand.recognizedPoint(.wrist),
+          let middleMCP = try? hand.recognizedPoint(.middleMCP),
+          thumb.confidence > 0.3, index.confidence > 0.3
+    else { return nil }
+    let thumbX = Double(thumb.location.x)
+    let thumbY = Double(1 - thumb.location.y)
+    let indexX = Double(index.location.x)
+    let indexY = Double(1 - index.location.y)
+    let handSize = max(
+      hypot(wrist.location.x - middleMCP.location.x,
+            wrist.location.y - middleMCP.location.y),
+      1e-4)
+    let pinchDistance = hypot(thumb.location.x - index.location.x,
+                              thumb.location.y - index.location.y)
+    return TrackedHand(
+      tracked: true, thumbX: thumbX, thumbY: thumbY,
+      indexX: indexX, indexY: indexY,
+      midX: (thumbX + indexX) / 2, midY: (thumbY + indexY) / 2,
+      pinchRatio: Double(pinchDistance / handSize),
+      handSize: Double(handSize),
+      confidence: Double(min(thumb.confidence, index.confidence)))
+  }
+
+  /// Synchronous hand-pose detection (up to two hands) on the prepared
+  /// (upright, cropped) model input buffer - landmarks come back directly
+  /// in crop space. Slot order is not stable across frames.
   private func detectHands(onPreparedInput input: CVPixelBuffer) {
     let start = CACurrentMediaTime()
-
-    var detected: (
-      thumb: (Double, Double), index: (Double, Double),
-      pinchRatio: Double, handSize: Double, confidence: Double
-    )? = nil
-
     do {
       try sequenceHandler.perform([handRequest], on: input)
     } catch {
-      // fall through with detected == nil
+      // fall through with no results
     }
-    if let hand = handRequest.results?.first,
-       let thumb = try? hand.recognizedPoint(.thumbTip),
-       let index = try? hand.recognizedPoint(.indexTip),
-       let wrist = try? hand.recognizedPoint(.wrist),
-       let middleMCP = try? hand.recognizedPoint(.middleMCP),
-       thumb.confidence > 0.3, index.confidence > 0.3 {
-      // Vision: normalized [0,1], origin BOTTOM-LEFT; the input already IS
-      // the upright center crop, so only the y-flip is needed.
-      func toCropSpace(_ p: VNRecognizedPoint) -> (Double, Double) {
-        return (Double(p.location.x), Double(1 - p.location.y))
-      }
-      let handSize = max(
-        hypot(wrist.location.x - middleMCP.location.x,
-              wrist.location.y - middleMCP.location.y),
-        1e-4)
-      let pinchDistance = hypot(thumb.location.x - index.location.x,
-                                thumb.location.y - index.location.y)
-      detected = (
-        thumb: toCropSpace(thumb),
-        index: toCropSpace(index),
-        pinchRatio: Double(pinchDistance / handSize),
-        handSize: Double(handSize),
-        confidence: Double(min(thumb.confidence, index.confidence))
-      )
-    }
-
+    let hands = (handRequest.results ?? []).compactMap(Self.extractHand)
     let elapsed = (CACurrentMediaTime() - start) * 1000
     lock.lock()
     handSeq += 1
-    if let hand = detected {
-      latestHand = HandResult(
-        seq: Double(handSeq), tracked: true,
-        thumbX: hand.thumb.0, thumbY: hand.thumb.1,
-        indexX: hand.index.0, indexY: hand.index.1,
-        midX: (hand.thumb.0 + hand.index.0) / 2,
-        midY: (hand.thumb.1 + hand.index.1) / 2,
-        pinchRatio: hand.pinchRatio, handSize: hand.handSize,
-        confidence: hand.confidence, detectionTimeMs: elapsed)
-    } else {
-      latestHand = HandResult(
-        seq: Double(handSeq), tracked: false, thumbX: 0, thumbY: 0,
-        indexX: 0, indexY: 0, midX: 0, midY: 0, pinchRatio: 1,
-        handSize: 0, confidence: 0, detectionTimeMs: elapsed)
-    }
+    latestHand = HandResult(
+      seq: Double(handSeq),
+      hand1: hands.count > 0 ? hands[0] : Self.emptyHand,
+      hand2: hands.count > 1 ? hands[1] : Self.emptyHand,
+      detectionTimeMs: elapsed)
     lock.unlock()
   }
 
