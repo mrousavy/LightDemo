@@ -759,6 +759,9 @@ function LightView() {
     isActive: pipeline != null && nitro != null && cameraDevice != null,
     device: cameraDevice as NonNullable<typeof cameraDevice>,
     outputs: [frameOutput],
+    // The synchronous pipeline is model-paced at ~30fps; streaming the
+    // camera at 60fps only burns ISP/memory bandwidth on frames we drop.
+    constraints: [{ fps: 30 }],
     // Pin the output orientation to the sensor's native orientation so
     // Frames always arrive tagged 'up' - camera, depth and hand coordinates
     // then all share the same (landscape) space with no rotation anywhere.
