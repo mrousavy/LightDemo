@@ -66,10 +66,6 @@ const AMBIENT_FILL = vec3f(0.78, 0.86, 1.0);
 const DITHER_STEP = 1.0 / 255.0;
 
 const BULB_WORLD_RADIUS = 0.05;
-const BULB_CAMERA_Z = 2.0;
-// Perspective reference: the bulb renders at exactly BULB_WORLD_RADIUS when
-// its z is at the nearest-object plane (z = 0), shrinking toward the back.
-const BULB_REFERENCE_Z = 0.0;
 const BULB_CORE = 5.0;
 const BULB_LIMB = 0.12;
 const BULB_EDGE = 0.75;
@@ -277,7 +273,7 @@ struct RelightParams {
   cropScale: vec2f,   // display uv -> camera-buffer uv (center crop)
   cropOffset: vec2f,
   time: f32,          // seconds, for the bulb flicker
-  _pad1: f32,
+  bulbScale: f32,     // on-screen size factor (hand-tracked perspective)
   _pad2: vec2f,
 }
 
@@ -386,8 +382,12 @@ fn depthRamp(value: f32) -> vec3f {
   return mix(warm, hot, (value - 0.75) / 0.25);
 }
 
+// Screen-space bulb radius. The scale factor comes from JS: while a hand
+// holds/steers the light it is the HAND's angular size (proportional to
+// 1/distance-from-camera - the bulb grows by exactly the factor the hand
+// does), otherwise a near-camera perspective on the light's z.
 fn bulbRadius() -> f32 {
-  return BULB_WORLD_RADIUS * ((BULB_CAMERA_Z - BULB_REFERENCE_Z) / (BULB_CAMERA_Z - params.lightZ));
+  return BULB_WORLD_RADIUS * params.bulbScale;
 }
 fn bulbExposure(radius: f32) -> f32 {
   let lightWorld = worldFromUv(params.lightPosition);

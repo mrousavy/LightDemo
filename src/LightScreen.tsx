@@ -388,6 +388,7 @@ function LightView() {
       lightX: 0.34,
       lightY: 0.34,
       lightZ: 0.25,
+      bulbScale: 1,
       grabbed: false,
       pinchFrames: 0,
       releaseFrames: 0,
@@ -808,6 +809,31 @@ function LightView() {
             }
           }
 
+          // --- bulb screen size ---
+          // Hand-held: scale by the hand's angular size (Vision handSize is
+          // proportional to 1/distance, the exact law the hand's own screen
+          // size follows - so the bulb grows by the same factor the hand
+          // does). Free-flying: perspective from a virtual camera close in
+          // front of the scene (must stay above LIGHT_Z_MAX = 0.6).
+          {
+            const HAND_SIZE_REF = 0.17
+            const BULB_CAMERA_Z = 0.85
+            let sizeSource = 0
+            if (controlsNow.handControl) {
+              if (hand.hand1.tracked && hand.hand1.handSize > sizeSource) {
+                sizeSource = hand.hand1.handSize
+              }
+              if (hand.hand2.tracked && hand.hand2.handSize > sizeSource) {
+                sizeSource = hand.hand2.handSize
+              }
+            }
+            const targetScale = sizeSource > 0
+              ? sizeSource / HAND_SIZE_REF
+              : BULB_CAMERA_Z / Math.max(BULB_CAMERA_Z - box.lightZ, 0.2)
+            const clamped = Math.min(Math.max(targetScale, 0.45), 3.5)
+            box.bulbScale += (clamped - box.bulbScale) * 0.2
+          }
+
           // --- relight uniforms ---
           const relightParams = new ArrayBuffer(96)
           const rpF32 = new Float32Array(relightParams)
@@ -835,6 +861,7 @@ function LightView() {
           rpF32[18] = cropOffX
           rpF32[19] = cropOffY
           rpF32[20] = (renderStart / 1000) % 1000
+          rpF32[21] = box.bulbScale
           device.queue.writeBuffer(pipeline.relightParamsBuffer, 0, relightParams)
 
           const bindGroup = device.createBindGroup({
