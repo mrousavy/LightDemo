@@ -305,6 +305,11 @@ function LightView() {
       releaseFrames: 0,
       everControlled: false,
       loggedFirstFrame: false,
+      handX: 0,
+      handY: 0,
+      handValid: false,
+      outlierCount: 0,
+      pinchSmoothed: 1,
     }),
     [],
   )
@@ -396,17 +401,45 @@ function LightView() {
           const hand = nitro.getHandResult()
           if (controlsNow.handControl && hand.seq >= 0 && hand.seq !== box.lastHandSeq) {
             box.lastHandSeq = hand.seq
-            if (hand.tracked) {
-              // Hand coords are in crop space (buffer orientation); mirror
-              // into display space to compare with the light.
-              const handX = mirrored ? 1 - hand.midX : hand.midX
-              const handY = hand.midY
-              const isPinching = hand.pinchRatio < 0.28
-              const isOpen = hand.pinchRatio > 0.42
+            // Gate low-confidence detections, and reject single-frame
+            // midpoint teleports (Vision jitters under motion blur, which
+            // previously made the grabbed light jump across the screen).
+            const rawX = mirrored ? 1 - hand.midX : hand.midX
+            const rawY = hand.midY
+            const jump = box.handValid
+              ? Math.hypot(rawX - box.handX, rawY - box.handY)
+              : 0
+            const isOutlier = box.handValid && jump > 0.3 && box.outlierCount < 3
+            const usable = hand.tracked && hand.confidence > 0.45 && !isOutlier
+            if (hand.tracked && isOutlier) box.outlierCount += 1
+            if (usable) {
+              box.outlierCount = 0
+              if (box.handValid) {
+                box.handX += (rawX - box.handX) * 0.6
+                box.handY += (rawY - box.handY) * 0.6
+                box.pinchSmoothed += (hand.pinchRatio - box.pinchSmoothed) * 0.5
+              } else {
+                box.handX = rawX
+                box.handY = rawY
+                box.pinchSmoothed = hand.pinchRatio
+                box.handValid = true
+              }
+              const handX = box.handX
+              const handY = box.handY
+              const isPinching = box.pinchSmoothed < 0.28
+              const isOpen = box.pinchSmoothed > 0.42
+              // Hover-steering (like the TypeGPU demo's pointer): a visible,
+              // non-pinching hand gently attracts the light, making the
+              // pinch-grab easy to initiate.
+              if (!box.grabbed && !controlsNow.touchActive && !isPinching) {
+                box.everControlled = true
+                box.lightX += (handX - box.lightX) * 0.06
+                box.lightY += (handY - box.lightY) * 0.06
+              }
               if (!box.grabbed) {
                 const dx = handX - box.lightX
                 const dy = handY - box.lightY
-                const near = dx * dx + dy * dy < 0.22 * 0.22
+                const near = dx * dx + dy * dy < 0.3 * 0.3
                 if (isPinching && near) {
                   box.pinchFrames += 1
                   if (box.pinchFrames >= 2) {
@@ -432,12 +465,14 @@ function LightView() {
                   box.lightX += (handX - box.lightX) * 0.5
                   box.lightY += (handY - box.lightY) * 0.5
                   // Light depth follows the hand's depth in the scene.
+                  // Sample in crop space (un-mirror the smoothed position).
+                  const bufX = mirrored ? 1 - handX : handX
                   const px = Math.min(
-                    Math.max(Math.floor(hand.midX * pipeline.depthW), 0),
+                    Math.max(Math.floor(bufX * pipeline.depthW), 0),
                     pipeline.depthW - 1,
                   )
                   const py = Math.min(
-                    Math.max(Math.floor(hand.midY * pipeline.depthH), 0),
+                    Math.max(Math.floor(handY * pipeline.depthH), 0),
                     pipeline.depthH - 1,
                   )
                   const disparity = new Float32Array(depth.data)
@@ -449,12 +484,14 @@ function LightView() {
                       1,
                     )
                     const targetZ = -0.55 + normalized * (0.9 + 0.55) + 0.06
-                    box.lightZ += (targetZ - box.lightZ) * 0.35
+                    box.lightZ += (targetZ - box.lightZ) * 0.25
                   }
                 }
               }
-            } else {
+            } else if (!hand.tracked) {
               box.pinchFrames = 0
+              box.handValid = false
+              box.outlierCount = 0
             }
           }
 
