@@ -40,7 +40,9 @@ const LIGHT_Z_MAX = 1.65
 
 const DEFAULT_CONTROLS: LightControls = {
   mirror: true,
-  rotationOverride: -1,
+  // 270 = visually verified for the Insta360 Link 2 Pro's current mounting.
+  // Cycle the Rot button to "auto" for face-roll-based auto-calibration.
+  rotationOverride: 270,
   mode: 0,
   intensity: 3.0,
   exposure: 0.5,
