@@ -26,4 +26,11 @@ export interface TrackedHand {
   handSize: number
   /** Minimum Vision confidence across the used joints, 0-1. */
   confidence: number
+  /**
+   * Raw model disparity of the hand region: an 85th-percentile probe over
+   * ALL confident landmarks (fingers, knuckles, palm, wrist). Far more
+   * robust than fingertip taps - a monocular model can smear thin fingers
+   * into a busy background, but not the whole hand. -1 when unavailable.
+   */
+  disparity: number
 }

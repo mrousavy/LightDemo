@@ -633,11 +633,13 @@ function LightView() {
                     freshHandUpdate = true
                     let hoverNearest = -1
                     for (const d of detail) {
-                      const s = nitro.sampleDepthMax([
-                        d.h.thumbX, d.h.thumbY,
-                        d.h.indexX, d.h.indexY,
-                        d.h.midX, d.h.midY,
-                      ])
+                      const s = d.h.disparity >= 0
+                        ? d.h.disparity
+                        : nitro.sampleDepthMax([
+                            d.h.thumbX, d.h.thumbY,
+                            d.h.indexX, d.h.indexY,
+                            d.h.midX, d.h.midY,
+                          ])
                       if (s > hoverNearest) hoverNearest = s
                     }
                     if (hoverNearest >= 0) {
@@ -715,11 +717,13 @@ function LightView() {
                   // march use. No hand-size heuristics, no envelope: where
                   // the depth map says the fingers are is where the light
                   // goes.
-                  const nearest = nitro.sampleDepthMax([
-                    locked.h.thumbX, locked.h.thumbY,
-                    locked.h.indexX, locked.h.indexY,
-                    locked.h.midX, locked.h.midY,
-                  ])
+                  const nearest = locked.h.disparity >= 0
+                    ? locked.h.disparity
+                    : nitro.sampleDepthMax([
+                        locked.h.thumbX, locked.h.thumbY,
+                        locked.h.indexX, locked.h.indexY,
+                        locked.h.midX, locked.h.midY,
+                      ])
                   if (nearest >= 0) {
                     const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
                     const normalized = Math.min(
@@ -881,7 +885,11 @@ function LightView() {
                 `pinch=${hand.hand1.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
                 `grabbed=${box.grabbed} rot=${rotationDeg} ` +
-                `handSize=${hand.hand1.handSize.toFixed(3)}`,
+                `handSize=${hand.hand1.handSize.toFixed(3)} ` +
+                `h1=(x${hand.hand1.midX.toFixed(2)} c${hand.hand1.confidence.toFixed(2)} ` +
+                `d${hand.hand1.disparity.toFixed(3)} p${hand.hand1.pinchRatio.toFixed(2)}) ` +
+                `h2=(x${hand.hand2.midX.toFixed(2)} c${hand.hand2.confidence.toFixed(2)} ` +
+                `d${hand.hand2.disparity.toFixed(3)} p${hand.hand2.pinchRatio.toFixed(2)})`,
             )
           }
           if (box.frameCount % 15 === 0) {

@@ -82,6 +82,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
   private var handSeq: Int = -1
   private var latestHand: HandResult
+  private var handProbes: ([CGPoint], [CGPoint]) = ([], [])
 
   private var controls: LightControls
   private var status: LightStatus
@@ -178,6 +179,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       }
       predictDepth(on: input, start: start, prepDone: prepDone)
       group.wait()
+      attachHandDepth()
     } else {
       predictDepth(on: input, start: start, prepDone: prepDone)
     }
@@ -382,12 +384,14 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
   private static let emptyHand = TrackedHand(
     tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
-    midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0)
+    midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0, disparity: -1)
 
   /// Extract a TrackedHand from a Vision observation. The input already IS
   /// the upright center crop, so only the y-flip is needed (Vision uses a
   /// bottom-left origin).
-  private static func extractHand(_ hand: VNHumanHandPoseObservation) -> TrackedHand? {
+  private static func extractHand(
+    _ hand: VNHumanHandPoseObservation
+  ) -> (hand: TrackedHand, probes: [CGPoint])? {
     guard let thumb = try? hand.recognizedPoint(.thumbTip),
           let index = try? hand.recognizedPoint(.indexTip),
           let wrist = try? hand.recognizedPoint(.wrist),
@@ -404,13 +408,23 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       1e-4)
     let pinchDistance = hypot(thumb.location.x - index.location.x,
                               thumb.location.y - index.location.y)
-    return TrackedHand(
+    // Every confident landmark (y-flipped into crop space) for the robust
+    // hand-depth probe in attachHandDepth().
+    var probes: [CGPoint] = []
+    if let all = try? hand.recognizedPoints(.all) {
+      for (_, point) in all where point.confidence > 0.3 {
+        probes.append(CGPoint(x: point.location.x, y: 1 - point.location.y))
+      }
+    }
+    let tracked = TrackedHand(
       tracked: true, thumbX: thumbX, thumbY: thumbY,
       indexX: indexX, indexY: indexY,
       midX: (thumbX + indexX) / 2, midY: (thumbY + indexY) / 2,
       pinchRatio: Double(pinchDistance / handSize),
       handSize: Double(handSize),
-      confidence: Double(min(thumb.confidence, index.confidence)))
+      confidence: Double(min(thumb.confidence, index.confidence)),
+      disparity: -1)
+    return (tracked, probes)
   }
 
   /// Synchronous hand-pose detection (up to two hands) on the prepared
@@ -423,16 +437,74 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     } catch {
       // fall through with no results
     }
-    let hands = (handRequest.results ?? []).compactMap(Self.extractHand)
+    let extracted = (handRequest.results ?? []).compactMap(Self.extractHand)
     let elapsed = (CACurrentMediaTime() - start) * 1000
     lock.lock()
     handSeq += 1
     latestHand = HandResult(
       seq: Double(handSeq),
-      hand1: hands.count > 0 ? hands[0] : Self.emptyHand,
-      hand2: hands.count > 1 ? hands[1] : Self.emptyHand,
+      hand1: extracted.count > 0 ? extracted[0].hand : Self.emptyHand,
+      hand2: extracted.count > 1 ? extracted[1].hand : Self.emptyHand,
       detectionTimeMs: elapsed)
+    handProbes = (
+      extracted.count > 0 ? extracted[0].probes : [],
+      extracted.count > 1 ? extracted[1].probes : [])
     lock.unlock()
+  }
+
+  /// Robust hand depth: raw disparity at the 85th percentile over every
+  /// confident landmark. Runs AFTER the depth prediction and hand detection
+  /// join (both buffers are stable), patching the disparity into the stored
+  /// hand result.
+  private func attachHandDepth() {
+    lock.lock()
+    let (probes1, probes2) = handProbes
+    let output = latestOutput
+    let hand = latestHand
+    lock.unlock()
+    guard let buffer = output, hand.hand1.tracked else { return }
+    let d1 = Self.robustDisparity(of: probes1, in: buffer)
+    let d2 = hand.hand2.tracked ? Self.robustDisparity(of: probes2, in: buffer) : -1
+    let h1 = Self.withDisparity(hand.hand1, d1)
+    let h2 = Self.withDisparity(hand.hand2, d2)
+    lock.lock()
+    latestHand = HandResult(
+      seq: hand.seq, hand1: h1, hand2: h2, detectionTimeMs: hand.detectionTimeMs)
+    lock.unlock()
+  }
+
+  private static func withDisparity(_ hand: TrackedHand, _ disparity: Double) -> TrackedHand {
+    return TrackedHand(
+      tracked: hand.tracked, thumbX: hand.thumbX, thumbY: hand.thumbY,
+      indexX: hand.indexX, indexY: hand.indexY,
+      midX: hand.midX, midY: hand.midY,
+      pinchRatio: hand.pinchRatio, handSize: hand.handSize,
+      confidence: hand.confidence, disparity: disparity)
+  }
+
+  private static func robustDisparity(of probes: [CGPoint], in buffer: CVPixelBuffer) -> Double {
+    guard !probes.isEmpty else { return -1 }
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(buffer) else { return -1 }
+    let width = CVPixelBufferGetWidth(buffer)
+    let height = CVPixelBufferGetHeight(buffer)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+    var values: [Float] = []
+    values.reserveCapacity(probes.count)
+    for probe in probes {
+      let x = min(max(Int(probe.x * CGFloat(width)), 0), width - 1)
+      let y = min(max(Int(probe.y * CGFloat(height)), 0), height - 1)
+      let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float16.self)
+      let value = Float(row[x])
+      if value.isFinite { values.append(value) }
+    }
+    guard !values.isEmpty else { return -1 }
+    // MAX, not a percentile: against depth-cue-heavy backgrounds (painted
+    // murals) the model can sink MOST of a hand into the wall - if any
+    // landmark still reads near, that is the hand's true plane. Spurious
+    // too-near outliers are rare (model errors bleed toward background).
+    return Double(values.max()!)
   }
 
   func getHandResult() throws -> HandResult {
