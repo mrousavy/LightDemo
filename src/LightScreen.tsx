@@ -269,7 +269,9 @@ function LightView() {
   useEffect(() => {
     if (!__DEV__) return
     const interval = setInterval(() => {
-      LightNativeModule.snapshotWindow('snap.png').catch(() => {})
+      LightNativeModule.snapshotWindow('snap.png').catch((e) =>
+        console.log(`[LightDemo] snapshot failed: ${String(e)}`),
+      )
     }, 3000)
     return () => clearInterval(interval)
   }, [])
@@ -338,13 +340,15 @@ function LightView() {
           // user wants mirror) holds. Applied consistently to the camera
           // fetch, the surface texture, and the hand coordinates.
           const mirrored = frame.isMirrored !== controlsNow.mirror
-          let rotationDeg: 0 | 90 | 180 | 270 = 0
-          if (frame.orientation === 'right') rotationDeg = 90
-          else if (frame.orientation === 'down') rotationDeg = 180
-          else if (frame.orientation === 'left') rotationDeg = 270
-          const rotated = rotationDeg === 90 || rotationDeg === 270
-          const dispW = rotated ? videoFrame.height : videoFrame.width
-          const dispH = rotated ? videoFrame.width : videoFrame.height
+          // NOTE: frame.orientation is ignored on purpose. On the Mac
+          // (Designed for iPad) the FaceTime camera delivers upright
+          // landscape buffers but VisionCamera tags them 'right' (iOS
+          // portrait-sensor assumption). Depth + hands (Vision, .up) use the
+          // raw buffer too, so rendering it unrotated keeps all three
+          // pipelines aligned in the same space.
+          const rotationDeg = 0 as const
+          const dispW = videoFrame.width
+          const dispH = videoFrame.height
 
           const encoder = device.createCommandEncoder()
 
@@ -592,9 +596,15 @@ function LightView() {
     [pipeline, device, nitro, box, rnwgpu],
   )
 
+  const onFrameDropped = useCallback((reason: string) => {
+    'worklet'
+    console.log(`[LightDemo] frame dropped: ${reason}`)
+  }, [])
+
   const frameOutput = useFrameOutput({
     pixelFormat: 'yuv',
     onFrame: onFrame,
+    onFrameDropped: onFrameDropped,
   })
 
   useCamera({
@@ -605,6 +615,13 @@ function LightView() {
     // Frames always arrive tagged 'up' - camera, depth and hand coordinates
     // then all share the same (landscape) space with no rotation anywhere.
     orientationSource: 'custom',
+    onStarted: () => console.log('[LightDemo] camera started'),
+    onStopped: () => console.log('[LightDemo] camera stopped'),
+    onError: (e) => console.log(`[LightDemo] camera error: ${String(e)}`),
+    onInterruptionStarted: (reason) =>
+      console.log(`[LightDemo] camera interrupted: ${String(reason)}`),
+    onInterruptionEnded: () => console.log('[LightDemo] camera interruption over'),
+    onConfigured: () => console.log('[LightDemo] camera configured'),
   })
   useEffect(() => {
     frameOutput.outputOrientation = 'up'
