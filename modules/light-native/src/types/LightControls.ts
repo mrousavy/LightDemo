@@ -24,6 +24,8 @@ export interface LightControls {
   lightZ: number
   /** Enable hand tracking control. */
   handControl: boolean
+  /** Mirror the displayed image (mirror-like UX for front cameras). */
+  mirror: boolean
   /** Take a window snapshot to this path on the next frame ("" = off). */
   snapshotPath: string
 }

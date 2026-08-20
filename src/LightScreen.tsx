@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Linking,
   PixelRatio,
@@ -19,6 +19,7 @@ import {
   useCameraDevices,
   useCameraPermission,
   useFrameOutput,
+  type Frame,
 } from 'react-native-vision-camera'
 import {
   LightNativeModule,
@@ -38,6 +39,7 @@ const LIGHT_Z_MIN = -0.66
 const LIGHT_Z_MAX = 1.65
 
 const DEFAULT_CONTROLS: LightControls = {
+  mirror: true,
   mode: 0,
   intensity: 3.0,
   exposure: 0.5,
@@ -250,12 +252,27 @@ function LightView() {
     nitro?.setControls(controls)
   }, [nitro, controls])
 
+  // Debug handle for the CDP console (scripts/jsconsole.mjs).
+  useEffect(() => {
+    ;(globalThis as Record<string, unknown>).__nitro = nitro
+  }, [nitro])
+
   // 5. Poll status for the HUD
   useEffect(() => {
     if (nitro == null) return
     const interval = setInterval(() => setStatus(nitro.getStatus()), 500)
     return () => clearInterval(interval)
   }, [nitro])
+
+  // 6. Debug: periodic window snapshot into Documents/snap.png so rendering
+  // can be verified headlessly from outside the app.
+  useEffect(() => {
+    if (!__DEV__) return
+    const interval = setInterval(() => {
+      LightNativeModule.snapshotWindow('snap.png').catch(() => {})
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [])
 
   const devices = useCameraDevices()
   const cameraDevice = useMemo(
@@ -290,9 +307,11 @@ function LightView() {
     [],
   )
 
-  const frameOutput = useFrameOutput({
-    pixelFormat: 'yuv',
-    onFrame: (frame) => {
+  // Stable worklet: identity must only change when the captured pipeline
+  // objects change, otherwise every React render re-serializes the closure
+  // and resets the worklet-side `box` state.
+  const onFrame = useCallback(
+    (frame: Frame) => {
       'worklet'
       if (pipeline == null || device == null || nitro == null) {
         frame.dispose()
@@ -315,7 +334,10 @@ function LightView() {
 
         const videoFrame = rnwgpu.createVideoFrameFromNativeBuffer(nativeBuffer.pointer)
         try {
-          const mirrored = frame.isMirrored
+          // XOR: mirror the display when exactly one of (buffer mirrored,
+          // user wants mirror) holds. Applied consistently to the camera
+          // fetch, the surface texture, and the hand coordinates.
+          const mirrored = frame.isMirrored !== controlsNow.mirror
           let rotationDeg: 0 | 90 | 180 | 270 = 0
           if (frame.orientation === 'right') rotationDeg = 90
           else if (frame.orientation === 'down') rotationDeg = 180
@@ -524,6 +546,17 @@ function LightView() {
             box.fps = box.fps * 0.9 + (1000 / Math.max(dt, 1)) * 0.1
           }
           box.lastFrameTime = now
+          if (box.frameCount % 150 === 0) {
+            console.log(
+              `[LightDemo] #${box.frameCount} ${box.fps.toFixed(0)}fps ` +
+                `render=${(now - renderStart).toFixed(1)}ms ` +
+                `depth#${depth.seq}=${depth.inferenceTimeMs.toFixed(0)}ms ` +
+                `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
+                `tracked=${hand.tracked} pinch=${hand.pinchRatio.toFixed(2)} ` +
+                `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
+                `grabbed=${box.grabbed}`,
+            )
+          }
           if (box.frameCount % 15 === 0) {
             nitro.setStatus({
               frameCount: box.frameCount,
@@ -556,13 +589,26 @@ function LightView() {
         frame.dispose()
       }
     },
+    [pipeline, device, nitro, box, rnwgpu],
+  )
+
+  const frameOutput = useFrameOutput({
+    pixelFormat: 'yuv',
+    onFrame: onFrame,
   })
 
   useCamera({
     isActive: pipeline != null && nitro != null && cameraDevice != null,
     device: cameraDevice as NonNullable<typeof cameraDevice>,
     outputs: [frameOutput],
+    // Pin the output orientation to the sensor's native orientation so
+    // Frames always arrive tagged 'up' - camera, depth and hand coordinates
+    // then all share the same (landscape) space with no rotation anywhere.
+    orientationSource: 'custom',
   })
+  useEffect(() => {
+    frameOutput.outputOrientation = 'up'
+  }, [frameOutput])
 
   // Square-ish canvas matching the depth model aspect (4:3), centered.
   const aspect = nitro != null ? nitro.depthWidth / nitro.depthHeight : 4 / 3

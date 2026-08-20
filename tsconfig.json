@@ -1,5 +1,8 @@
 {
   "extends": "@react-native/typescript-config",
-  "include": ["**/*.ts", "**/*.tsx"],
+  "compilerOptions": {
+    "types": ["react-native", "@webgpu/types", "jest"]
+  },
+  "include": ["**/*.ts", "**/*.tsx", "modules/**/*.ts"],
   "exclude": ["**/node_modules", "**/Pods"]
 }

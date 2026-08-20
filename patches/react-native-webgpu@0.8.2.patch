@@ -1,0 +1,21 @@
+diff --git a/apple/WebGPUView.mm b/apple/WebGPUView.mm
+index 33e56374068eec2daed7cb8dda7b64a7db94ae3e..fd3b3ebb4e5600b5242edfa94fef40582a02f9fb 100644
+--- a/apple/WebGPUView.mm
++++ b/apple/WebGPUView.mm
+@@ -16,6 +16,16 @@ + (ComponentDescriptorProvider)componentDescriptorProvider {
+   return concreteComponentDescriptorProvider<WebGPUViewComponentDescriptor>();
+ }
+ 
++- (instancetype)initWithFrame:(CGRect)frame {
++  if (self = [super initWithFrame:frame]) {
++    // RN >= 0.87 asserts (in debug) that RCTViewComponentView subclasses
++    // initialize _props with their concrete props type.
++    static const auto defaultProps = std::make_shared<const WebGPUViewProps>();
++    _props = defaultProps;
++  }
++  return self;
++}
++
+ - (void)prepareForRecycle {
+   [super prepareForRecycle];
+   /*

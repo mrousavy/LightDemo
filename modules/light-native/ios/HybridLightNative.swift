@@ -96,6 +96,15 @@ final class HybridLightNative: HybridLightNativeSpec {
   // MARK: - Debug utilities
 
   func snapshotWindow(path: String) throws -> Promise<Bool> {
+    // Relative paths resolve into the app's Documents directory (readable
+    // from the Mac at ~/Library/Containers/<bundle-id>/Data/Documents).
+    let resolved: String
+    if path.hasPrefix("/") {
+      resolved = path
+    } else {
+      let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+      resolved = documents.appendingPathComponent(path).path
+    }
     return Promise<Bool>.async { @MainActor in
       guard let window = UIApplication.shared.connectedScenes
         .compactMap({ $0 as? UIWindowScene })
@@ -109,7 +118,7 @@ final class HybridLightNative: HybridLightNativeSpec {
         window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
       }
       guard let data = image.pngData() else { return false }
-      try data.write(to: URL(fileURLWithPath: path))
+      try data.write(to: URL(fileURLWithPath: resolved))
       return true
     }
   }

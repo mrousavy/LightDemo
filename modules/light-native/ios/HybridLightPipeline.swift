@@ -58,7 +58,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       mode: 0, intensity: 3.0, exposure: 0.5, relief: 0.85, specular: 0.22,
       shadow: 0.7, occlusion: 0.55, colorR: 1.0, colorG: 0.83, colorB: 0.6,
       touchX: 0.34, touchY: 0.34, touchActive: false, lightZ: 0.42,
-      handControl: true, snapshotPath: "")
+      handControl: true, mirror: true, snapshotPath: "")
     self.status = LightStatus(
       frameCount: 0, fps: 0, renderTimeMs: 0, depthTimeMs: 0, handTimeMs: 0,
       frameWidth: 0, frameHeight: 0, frameOrientation: "", frameMirrored: false,
@@ -249,73 +249,75 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     let frameWidth = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
     let frameHeight = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
 
-    var result = HandResult(
-      seq: 0, tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
-      midX: 0, midY: 0, pinchRatio: 1, confidence: 0, detectionTimeMs: 0)
-
-    defer {
-      result.detectionTimeMs = (CACurrentMediaTime() - start) * 1000
-      lock.lock()
-      handSeq += 1
-      result.seq = Double(handSeq)
-      latestHand = result
-      lock.unlock()
-    }
+    var detected: (
+      thumb: (Double, Double), index: (Double, Double),
+      pinchRatio: Double, confidence: Double
+    )? = nil
 
     do {
       try handler.perform([request])
     } catch {
-      return
+      // fall through with detected == nil
     }
-    guard let hand = request.results?.first,
-          let thumb = try? hand.recognizedPoint(.thumbTip),
-          let index = try? hand.recognizedPoint(.indexTip),
-          let wrist = try? hand.recognizedPoint(.wrist),
-          let middleMCP = try? hand.recognizedPoint(.middleMCP),
-          thumb.confidence > 0.3, index.confidence > 0.3
-    else {
-      return
+    if let hand = request.results?.first,
+       let thumb = try? hand.recognizedPoint(.thumbTip),
+       let index = try? hand.recognizedPoint(.indexTip),
+       let wrist = try? hand.recognizedPoint(.wrist),
+       let middleMCP = try? hand.recognizedPoint(.middleMCP),
+       thumb.confidence > 0.3, index.confidence > 0.3 {
+      // Vision: normalized [0,1], origin BOTTOM-LEFT of the full frame.
+      // Convert into the center-cropped (model aspect) region, origin TOP-LEFT.
+      let modelAspect = CGFloat(modelWidth) / CGFloat(modelHeight)
+      let frameAspect = frameWidth / frameHeight
+      var cropX: CGFloat = 0
+      var cropY: CGFloat = 0
+      var cropW: CGFloat = 1
+      var cropH: CGFloat = 1
+      if frameAspect > modelAspect {
+        cropW = modelAspect / frameAspect
+        cropX = (1 - cropW) / 2
+      } else {
+        cropH = frameAspect / modelAspect
+        cropY = (1 - cropH) / 2
+      }
+      func toCropSpace(_ p: VNRecognizedPoint) -> (Double, Double) {
+        let x = (p.location.x - cropX) / cropW
+        let y = ((1 - p.location.y) - cropY) / cropH
+        return (Double(x), Double(y))
+      }
+      let handSize = max(
+        hypot(wrist.location.x - middleMCP.location.x,
+              wrist.location.y - middleMCP.location.y),
+        1e-4)
+      let pinchDistance = hypot(thumb.location.x - index.location.x,
+                                thumb.location.y - index.location.y)
+      detected = (
+        thumb: toCropSpace(thumb),
+        index: toCropSpace(index),
+        pinchRatio: Double(pinchDistance / handSize),
+        confidence: Double(min(thumb.confidence, index.confidence))
+      )
     }
 
-    // Vision: normalized [0,1], origin BOTTOM-LEFT of the full frame.
-    // Convert into the center-cropped (model aspect) region, origin TOP-LEFT.
-    let modelAspect = CGFloat(modelWidth) / CGFloat(modelHeight)
-    let frameAspect = frameWidth / frameHeight
-    var cropX: CGFloat = 0
-    var cropY: CGFloat = 0
-    var cropW: CGFloat = 1
-    var cropH: CGFloat = 1
-    if frameAspect > modelAspect {
-      cropW = modelAspect / frameAspect
-      cropX = (1 - cropW) / 2
+    let elapsed = (CACurrentMediaTime() - start) * 1000
+    lock.lock()
+    handSeq += 1
+    if let hand = detected {
+      latestHand = HandResult(
+        seq: Double(handSeq), tracked: true,
+        thumbX: hand.thumb.0, thumbY: hand.thumb.1,
+        indexX: hand.index.0, indexY: hand.index.1,
+        midX: (hand.thumb.0 + hand.index.0) / 2,
+        midY: (hand.thumb.1 + hand.index.1) / 2,
+        pinchRatio: hand.pinchRatio, confidence: hand.confidence,
+        detectionTimeMs: elapsed)
     } else {
-      cropH = frameAspect / modelAspect
-      cropY = (1 - cropH) / 2
+      latestHand = HandResult(
+        seq: Double(handSeq), tracked: false, thumbX: 0, thumbY: 0,
+        indexX: 0, indexY: 0, midX: 0, midY: 0, pinchRatio: 1,
+        confidence: 0, detectionTimeMs: elapsed)
     }
-    func toCropSpace(_ p: VNRecognizedPoint) -> (Double, Double) {
-      let x = (p.location.x - cropX) / cropW
-      let y = ((1 - p.location.y) - cropY) / cropH
-      return (Double(x), Double(y))
-    }
-
-    let (tx, ty) = toCropSpace(thumb)
-    let (ix, iy) = toCropSpace(index)
-    let handSize = max(
-      hypot(wrist.location.x - middleMCP.location.x,
-            wrist.location.y - middleMCP.location.y),
-      1e-4)
-    let pinchDistance = hypot(thumb.location.x - index.location.x,
-                              thumb.location.y - index.location.y)
-
-    result.tracked = true
-    result.thumbX = tx
-    result.thumbY = ty
-    result.indexX = ix
-    result.indexY = iy
-    result.midX = (tx + ix) / 2
-    result.midY = (ty + iy) / 2
-    result.pinchRatio = Double(pinchDistance / handSize)
-    result.confidence = Double(min(thumb.confidence, index.confidence))
+    lock.unlock()
   }
 
   func getHandResult() throws -> HandResult {
