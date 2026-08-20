@@ -15,7 +15,7 @@ const CONSTANTS = /* wgsl */ `
 // depth model resolution with bilinear depth upsampling: normals, AO and
 // shadows computed at raw model resolution look blocky against the sharp
 // camera image. Gradient/AO step radii stay in MODEL texel units.
-const FIELD_SCALE = 2;
+const FIELD_SCALE = 4;
 const TEMPORAL_ALPHA = 0.32;
 // Original demo uses 0.8; raised so fast-moving objects leave less of a
 // residual lighting trail (20% -> 8% of the previous depth under motion).
