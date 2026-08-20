@@ -62,8 +62,8 @@ const BULB_CAMERA_Z = 2.0;
 // Perspective reference: the bulb renders at exactly BULB_WORLD_RADIUS when
 // its z is at the nearest-object plane (z = 0), shrinking toward the back.
 const BULB_REFERENCE_Z = 0.0;
-const BULB_CORE = 8.0;
-const BULB_LIMB = 0.28;
+const BULB_CORE = 5.0;
+const BULB_LIMB = 0.12;
 const BULB_EDGE = 0.75;
 const BULB_EDGE_FLOOR = 0.004;
 const BULB_EDGE_LIMIT = 0.3;
@@ -72,6 +72,9 @@ const BULB_HALO_SPAN = 1.2;
 const BULB_VEIL = 0.12;
 const BULB_VEIL_SPAN = 4.0;
 const BULB_ONSET = 0.6;
+const BULB_TURB_FREQ = 3.0;
+const BULB_TURB_SPEED = 0.35;
+const BULB_TURB_AMOUNT = 0.22;
 const BULB_OCCLUSION_SOFTNESS = 0.02;
 const BULB_SOURCE_SOFTNESS = 0.08;
 const BULB_SAMPLE_SPREAD = 0.6;
@@ -251,6 +254,20 @@ fn flicker(t: f32) -> f32 {
              + 0.014 * sin(t * 23.0 + 0.5);
 }
 
+// Cheap value noise for the bulb's internal shimmer.
+fn hash21(p: vec2f) -> f32 {
+  return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453);
+}
+fn vnoise(p: vec2f) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(hash21(i), hash21(i + vec2f(1.0, 0.0)), u.x),
+    mix(hash21(i + vec2f(0.0, 1.0)), hash21(i + vec2f(1.0, 1.0)), u.x),
+    u.y);
+}
+
 @group(0) @binding(0) var<uniform> params: RelightParams;
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var surfaceTex: texture_2d<f32>;
@@ -341,16 +358,38 @@ fn bulbExposure(radius: f32) -> f32 {
 }
 fn bulbSurface(uv: vec2f, tint: vec3f, depthValue: f32) -> vec4f {
   let radius = bulbRadius();
-  let spread = length(worldFromUv(uv) - worldFromUv(params.lightPosition)) / radius;
+  let offset = (worldFromUv(uv) - worldFromUv(params.lightPosition)) / radius;
+  let spread = length(offset);
   let limb = saturate(spread);
   let dome = sqrt(max(1.0 - limb * limb, 0.0));
-  let facing = dome * dome;
   let front = params.lightZ + BULB_WORLD_RADIUS * dome;
   let solid = smoothstep(0.0, BULB_OCCLUSION_SOFTNESS, front - surfaceZ(depthValue));
   let edge = clamp(fwidth(spread) * BULB_EDGE, BULB_EDGE_FLOOR, BULB_EDGE_LIMIT);
   let coverage = (1.0 - smoothstep(1.0 - edge, 1.0 + edge, spread)) * solid;
-  let hue = mix(tint, vec3f(1.0), facing * facing);
-  return vec4f(hue * (BULB_CORE * mix(BULB_LIMB, 1.0, facing)), coverage);
+
+  // Blackbody-style radial temperature: white-hot core cooling through the
+  // tint into a deep ember at the limb - a frosted incandescent globe
+  // instead of a flat white disc.
+  let core = vec3f(1.0, 0.97, 0.9);
+  let ember = tint * vec3f(0.95, 0.55, 0.3);
+  var glass = mix(core, tint, smoothstep(0.05, 0.6, spread));
+  glass = mix(glass, ember, smoothstep(0.55, 0.95, spread));
+
+  // Slow convective shimmer inside the globe: two octaves of value noise
+  // drifting upward, masked to the mid-radius band so the core stays clean
+  // and the rim stays smooth.
+  let drift = params.time * BULB_TURB_SPEED;
+  let swirl = offset + vec2f(drift * 0.6, -drift);
+  let turb = vnoise(swirl * BULB_TURB_FREQ) * 0.67 +
+             vnoise(swirl * (BULB_TURB_FREQ * 2.3) + vec2f(17.0)) * 0.33;
+  let band = smoothstep(0.12, 0.45, spread) * (1.0 - smoothstep(0.75, 1.0, spread));
+  let shimmer = 1.0 + (turb - 0.5) * 2.0 * BULB_TURB_AMOUNT * band;
+
+  // Limb darkening steeper than physical (dome^2): the tonemapper clips
+  // the interior to white anyway, so an early falloff is what actually
+  // keeps the amber limb and the shimmer visible on screen.
+  let brightness = BULB_CORE * mix(BULB_LIMB, 1.0, dome * dome) * shimmer;
+  return vec4f(glass * brightness, coverage);
 }
 fn bulbGlow(uv: vec2f, tint: vec3f) -> vec3f {
   let radius = bulbRadius();
