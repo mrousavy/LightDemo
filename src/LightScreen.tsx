@@ -36,9 +36,12 @@ const REQUIRED_FEATURES: GPUFeatureName[] = [
   'dawn-multi-planar-formats' as GPUFeatureName,
 ]
 
-// Light z range (surface-Z space), from the TypeGPU demo.
-const LIGHT_Z_MIN = -0.66
-const LIGHT_Z_MAX = 1.65
+// Unified z-space, MUST match SURFACE_FAR_Z in shaders.ts: normalized
+// disparity 1 (nearest object) -> z = 0, disparity 0 (farthest) -> -Z_FAR.
+// Positive z is toward the viewer, in front of the entire scene.
+const Z_FAR = 1.1
+const LIGHT_Z_MIN = -Z_FAR
+const LIGHT_Z_MAX = 0.6
 
 const DEFAULT_CONTROLS: LightControls = {
   mirror: true,
@@ -63,7 +66,7 @@ const DEFAULT_CONTROLS: LightControls = {
   touchX: 0.34,
   touchY: 0.34,
   touchActive: false,
-  lightZ: 0.42,
+  lightZ: 0.25,
   handControl: true,
   snapshotPath: '',
 }
@@ -380,7 +383,7 @@ function LightView() {
       rangeInitialized: false,
       lightX: 0.34,
       lightY: 0.34,
-      lightZ: 0.42,
+      lightZ: 0.25,
       grabbed: false,
       pinchFrames: 0,
       releaseFrames: 0,
@@ -396,7 +399,7 @@ function LightView() {
       lostFrames: 0,
       handSizeSmoothed: 0,
       grabRefSize: 0,
-      zSceneEnvelope: -0.3,
+      zSceneEnvelope: -Z_FAR,
       // Cached zero-copy depth import, keyed by the IOSurface pointer. With
       // CoreML output backings the pointer is stable, so the import and
       // bind group happen once and only the access window is per-frame.
@@ -583,7 +586,7 @@ function LightView() {
                     // Re-reference the proximity control at each grab: z
                     // moves relative to the hand's size at THIS grab.
                     box.grabRefSize = 0
-                    box.zSceneEnvelope = -0.7
+                    box.zSceneEnvelope = -Z_FAR
                   }
                 } else {
                   box.pinchFrames = 0
@@ -617,7 +620,7 @@ function LightView() {
                         Math.max((hoverNearest - box.rangeLow) / span, 0),
                         1,
                       )
-                      const hoverZ = -0.7 + hoverNorm * 0.7 + 0.04
+                      const hoverZ = (hoverNorm - 1) * Z_FAR + 0.04
                       box.lightZ += (hoverZ - box.lightZ) * 0.08
                     }
                   }
@@ -710,7 +713,7 @@ function LightView() {
                       Math.max((nearest - box.rangeLow) / span, 0),
                       1,
                     )
-                    const zSample = -0.7 + normalized * 0.7 + 0.04
+                    const zSample = (normalized - 1) * Z_FAR + 0.04
                     box.zSceneEnvelope =
                       zSample >= box.zSceneEnvelope
                         ? zSample
@@ -805,7 +808,7 @@ function LightView() {
                 Math.max((floorSample - box.rangeLow) / span, 0),
                 1,
               )
-              const zFloor = -0.7 + floorNorm * 0.7 - 0.08
+              const zFloor = (floorNorm - 1) * Z_FAR - 0.12
               if (box.lightZ < zFloor) box.lightZ = zFloor
             }
           }

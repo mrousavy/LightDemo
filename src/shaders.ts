@@ -31,8 +31,19 @@ const OCCLUSION_SCALE = 0.07;
 const OCCLUSION_RANGE = 0.25;
 const OCCLUSION_FLOOR = 0.012;
 
+// ONE unified z-space for EVERYTHING (shading, shadows, occlusion, bulb,
+// and the JS light control): normalized disparity 1 (nearest object) maps
+// to z = 0, disparity 0 (farthest) to z = SURFACE_FAR_Z. Positive z is
+// toward the viewer, in front of the whole scene. The original demo used a
+// second, exaggerated space just for shadows (far -1.25 vs -0.7), which
+// forced error-prone conversions of the light's z between spaces; with one
+// space the light is trivially "inside" the reconstructed scene.
+// The magnitude also sets relief realism: with a typical desk scene
+// spanning ~2m of depth and the image height ~0.8m at face distance,
+// depth range / image height is ~1.1 - which is exactly this constant
+// (world x/y units are image-height = 1).
 const NEAR_Z = 0.0;
-const SURFACE_FAR_Z = -0.7;
+const SURFACE_FAR_Z = -1.1;
 const LIGHT_RADIUS = 0.85;
 const LIGHT_WRAP = 0.25;
 const RELIEF_SCALE = 200.0;
@@ -48,7 +59,9 @@ const DITHER_STEP = 1.0 / 255.0;
 
 const BULB_WORLD_RADIUS = 0.05;
 const BULB_CAMERA_Z = 2.0;
-const BULB_REFERENCE_Z = 0.42;
+// Perspective reference: the bulb renders at exactly BULB_WORLD_RADIUS when
+// its z is at the nearest-object plane (z = 0), shrinking toward the back.
+const BULB_REFERENCE_Z = 0.0;
 const BULB_CORE = 8.0;
 const BULB_LIMB = 0.28;
 const BULB_EDGE = 0.75;
@@ -63,7 +76,6 @@ const BULB_OCCLUSION_SOFTNESS = 0.02;
 const BULB_SOURCE_SOFTNESS = 0.08;
 const BULB_SAMPLE_SPREAD = 0.6;
 
-const SHADOW_FAR_Z = -1.25;
 const SHADOW_STEPS = 32;
 const SHADOW_SPAN = 0.3;
 const SHADOW_BASELINE = 0.005;
@@ -262,7 +274,6 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 }
 
 fn surfaceZ(depthValue: f32) -> f32 { return mix(SURFACE_FAR_Z, NEAR_Z, depthValue); }
-fn shadowZ(depthValue: f32) -> f32 { return mix(SHADOW_FAR_Z, NEAR_Z, depthValue); }
 fn depthAt(uv: vec2f) -> f32 { return textureSampleLevel(surfaceTex, samp, uv, 0.0).w; }
 
 // display uv -> camera-buffer uv: mirror, then center-crop to model aspect.
@@ -277,35 +288,27 @@ fn ignDither(uv: vec2f) -> f32 {
   return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
 }
 
-// The shadow march runs in the exaggerated shadowZ space (far -1.25 vs the
-// lighting space's -0.7). The light's z MUST be scaled into that same space:
-// comparing shadow-space surfaces against a raw lighting-space light places
-// a near-surface light INSIDE the scene's exaggerated relief, making faces
-// self-shadow to black when the bulb hovers right in front of them.
-fn shadowSpaceLightZ() -> f32 {
-  return params.lightZ * (SHADOW_FAR_Z / SURFACE_FAR_Z);
-}
-
 // origin/lightDirection are in aspect-corrected world space; texture
-// lookups convert back through uvFromWorld.
+// lookups convert back through uvFromWorld. The march runs in the SAME
+// unified z-space as the shading, so the light's z needs no conversion.
 fn shadowFactor(origin: vec3f, lightDirection: vec3f, reach: f32, jitter: f32) -> f32 {
   let stride = reach / f32(SHADOW_STEPS);
   let baselineTravel = reach * (SHADOW_BASELINE / SHADOW_SPAN);
   let trailProbe = origin - lightDirection * baselineTravel;
   let receiverRise = max(
-    origin.z - shadowZ(depthAt(uvFromWorld(trailProbe.xy))) - baselineTravel * lightDirection.z,
+    origin.z - surfaceZ(depthAt(uvFromWorld(trailProbe.xy))) - baselineTravel * lightDirection.z,
     0.0);
   let risePerTravel = receiverRise / baselineTravel;
   var occlusion = 0.0;
   for (var step = 0; step < SHADOW_STEPS; step++) {
     let travel = (f32(step) + jitter) * stride;
     let probe = origin + lightDirection * travel;
-    let sampleZ = shadowZ(depthAt(uvFromWorld(probe.xy)));
+    let sampleZ = surfaceZ(depthAt(uvFromWorld(probe.xy)));
     let difference = sampleZ - probe.z;
     let bias = SHADOW_BIAS + travel * (SHADOW_SLOPE_BIAS + risePerTravel);
     let thickness = SHADOW_THICKNESS * (1.0 + (travel / SHADOW_SPAN) * SHADOW_THICKNESS_GROWTH);
     if (difference > bias && difference < thickness) {
-      let behindLight = 1.0 - saturate((sampleZ - shadowSpaceLightZ()) / SHADOW_FRONT_FADE);
+      let behindLight = 1.0 - saturate((sampleZ - params.lightZ) / SHADOW_FRONT_FADE);
       occlusion += saturate((difference - bias) / SHADOW_SOFTNESS) * behindLight;
     }
   }
@@ -399,13 +402,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4f {
 
   var shadow = 1.0;
   if (params.shadowAmount > 0.0) {
-    // March entirely in shadow space: origin AND light z both scaled.
-    let shadowOrigin = vec3f(world, shadowZ(surface.w));
-    let shadowLight = vec3f(lightPosition.xy, shadowSpaceLightZ());
-    let shadowToLight = shadowLight - shadowOrigin;
-    let shadowDistance = max(length(shadowToLight), 0.0001);
-    let reach = shadowDistance * (SHADOW_SPAN / max(length(shadowToLight.xy), SHADOW_SPAN));
-    let traced = shadowFactor(shadowOrigin, shadowToLight / shadowDistance, reach, noise);
+    // Same space as the shading: march straight from the shaded point
+    // toward the actual light position.
+    let reach = dist * (SHADOW_SPAN / max(length(toLight.xy), SHADOW_SPAN));
+    let traced = shadowFactor(position, lightDirection, reach, noise);
     // Area-light physics: the bulb (radius 0.05) subtends a huge solid
     // angle for surfaces right next to it, so shadows fade out near the
     // light instead of blackening a face the bulb is hovering in front of.
