@@ -113,12 +113,12 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     self.controls = LightControls(
       mode: 0, intensity: 3.0, exposure: 0.5, relief: 0.85, specular: 0.22,
       shadow: 0.7, occlusion: 0.55, colorR: 1.0, colorG: 0.83, colorB: 0.6,
-      touchX: 0.34, touchY: 0.34, touchActive: false, lightZ: 0.42,
+      touchX: 0.34, touchY: 0.34, touchActive: false, lightZ: 0.25,
       handControl: true, mirror: true, rotationOverride: -1, snapshotPath: "")
     self.status = LightStatus(
       frameCount: 0, fps: 0, renderTimeMs: 0, depthTimeMs: 0, handTimeMs: 0,
       frameWidth: 0, frameHeight: 0, frameOrientation: "", frameMirrored: false,
-      pixelFormat: "", lightX: 0.34, lightY: 0.34, lightZ: 0.42,
+      pixelFormat: "", lightX: 0.34, lightY: 0.34, lightZ: 0.25,
       handTracked: false, pinchRatio: 1, grabbed: false, depthSeq: -1, handSeq: -1)
   }
 
