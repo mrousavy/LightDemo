@@ -280,7 +280,9 @@ function LightView() {
     if (nitro == null || pipeline == null) return
     const interval = setInterval(() => {
       const count = nitro.getStatus().frameCount
-      if (count === watchdog.lastCount && count > 0 && !cameraSuspended) {
+      // NOTE: also triggers at count 0 - a wedged external camera can stall
+      // after delivering a single frame (status is only written every 15).
+      if (count === watchdog.lastCount && !cameraSuspended) {
         watchdog.stalledTicks += 1
         if (watchdog.stalledTicks >= 2) {
           console.log(
