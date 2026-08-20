@@ -12,6 +12,8 @@
 namespace margelo::nitro::lightnative { struct DepthResult; }
 // Forward declaration of `HandResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct HandResult; }
+// Forward declaration of `HybridFrameSpec` to properly resolve imports.
+namespace margelo::nitro::camera { class HybridFrameSpec; }
 // Forward declaration of `HybridLightNativeSpec` to properly resolve imports.
 namespace margelo::nitro::lightnative { class HybridLightNativeSpec; }
 // Forward declaration of `HybridLightPipelineSpec` to properly resolve imports.
@@ -31,6 +33,7 @@ namespace margelo::nitro::lightnative { struct LightStatus; }
 #include <NitroModules/ArrayBuffer.hpp>
 #include <NitroModules/Promise.hpp>
 #include <NitroModules/Result.hpp>
+#include <VisionCamera/HybridFrameSpec.hpp>
 #include <exception>
 #include <memory>
 #include <string>
@@ -46,6 +49,8 @@ namespace margelo::nitro::lightnative { struct LightStatus; }
 #include <NitroModules/DateToChronoDate.hpp>
 
 // Forward declarations of Swift defined types
+// Forward declaration of `HybridFrameSpec_cxx` to properly resolve imports.
+namespace VisionCamera { class HybridFrameSpec_cxx; }
 // Forward declaration of `HybridLightNativeSpec_cxx` to properly resolve imports.
 namespace NitroLightNative { class HybridLightNativeSpec_cxx; }
 // Forward declaration of `HybridLightPipelineSpec_cxx` to properly resolve imports.

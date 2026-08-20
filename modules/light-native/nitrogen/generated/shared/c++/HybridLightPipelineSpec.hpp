@@ -15,6 +15,8 @@
 
 // Forward declaration of `DepthResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct DepthResult; }
+// Forward declaration of `HybridFrameSpec` to properly resolve imports.
+namespace margelo::nitro::camera { class HybridFrameSpec; }
 // Forward declaration of `HandResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct HandResult; }
 // Forward declaration of `LightControls` to properly resolve imports.
@@ -23,6 +25,8 @@ namespace margelo::nitro::lightnative { struct LightControls; }
 namespace margelo::nitro::lightnative { struct LightStatus; }
 
 #include "DepthResult.hpp"
+#include <memory>
+#include <VisionCamera/HybridFrameSpec.hpp>
 #include "HandResult.hpp"
 #include <vector>
 #include "LightControls.hpp"
@@ -61,7 +65,7 @@ namespace margelo::nitro::lightnative {
 
     public:
       // Methods
-      virtual DepthResult analyzeSync(uint64_t pointer, double orientationDegrees, bool runHands) = 0;
+      virtual DepthResult analyzeSync(const std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>& frame, double orientationDegrees, bool runHands) = 0;
       virtual DepthResult getDepthResult() = 0;
       virtual HandResult getHandResult() = 0;
       virtual double sampleDepthMax(const std::vector<double>& points) = 0;

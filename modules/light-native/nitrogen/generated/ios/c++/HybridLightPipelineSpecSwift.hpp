@@ -14,6 +14,8 @@ namespace NitroLightNative { class HybridLightPipelineSpec_cxx; }
 
 // Forward declaration of `DepthResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct DepthResult; }
+// Forward declaration of `HybridFrameSpec` to properly resolve imports.
+namespace margelo::nitro::camera { class HybridFrameSpec; }
 // Forward declaration of `HandResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct HandResult; }
 // Forward declaration of `LightControls` to properly resolve imports.
@@ -22,6 +24,8 @@ namespace margelo::nitro::lightnative { struct LightControls; }
 namespace margelo::nitro::lightnative { struct LightStatus; }
 
 #include "DepthResult.hpp"
+#include <memory>
+#include <VisionCamera/HybridFrameSpec.hpp>
 #include "HandResult.hpp"
 #include <vector>
 #include "LightControls.hpp"
@@ -86,8 +90,8 @@ namespace margelo::nitro::lightnative {
 
   public:
     // Methods
-    inline DepthResult analyzeSync(uint64_t pointer, double orientationDegrees, bool runHands) override {
-      auto __result = _swiftPart.analyzeSync(std::forward<decltype(pointer)>(pointer), std::forward<decltype(orientationDegrees)>(orientationDegrees), std::forward<decltype(runHands)>(runHands));
+    inline DepthResult analyzeSync(const std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>& frame, double orientationDegrees, bool runHands) override {
+      auto __result = _swiftPart.analyzeSync(frame, std::forward<decltype(orientationDegrees)>(orientationDegrees), std::forward<decltype(runHands)>(runHands));
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }

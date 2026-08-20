@@ -10,6 +10,7 @@ import CoreVideo
 import Foundation
 import NitroModules
 import Vision
+import VisionCamera
 
 /// Frame analysis pipeline: CoreML monocular depth (ANE) + Vision hand pose.
 /// Everything runs SYNCHRONOUSLY on the caller's (frame-processor) thread so
@@ -128,12 +129,17 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   }
 
   func analyzeSync(
-    pointer: UInt64, orientationDegrees: Double, runHands: Bool
+    frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool
   ) throws -> DepthResult {
-    guard let raw = UnsafeRawPointer(bitPattern: UInt(pointer)) else {
-      throw RuntimeError.error(withMessage: "analyzeSync: pointer is null")
+    // Typed Frame handoff: cast the spec to VisionCamera's public
+    // NativeFrame protocol for native buffer access.
+    guard let nativeFrame = frame as? any NativeFrame else {
+      throw RuntimeError.error(withMessage: "The given Frame is not a NativeFrame!")
     }
-    let pixelBuffer = Unmanaged<CVPixelBuffer>.fromOpaque(raw).takeUnretainedValue()
+    guard let sampleBuffer = nativeFrame.sampleBuffer,
+          let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+      throw RuntimeError.error(withMessage: "The given Frame has no valid pixel buffer!")
+    }
     let orientation = Self.cgOrientation(fromDegrees: Int(orientationDegrees))
 
     runDepthInference(on: pixelBuffer, orientation: orientation)

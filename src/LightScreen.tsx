@@ -429,12 +429,10 @@ function LightView() {
 
           // --- depth + hands: fully synchronous, same-frame (async results
           // lag the camera image; a stale depth map paints ghost trails
-          // behind fast-moving objects) ---
-          const depth = nitro.analyzeSync(
-            nativeBuffer.pointer,
-            rotationDeg,
-            controlsNow.handControl,
-          )
+          // behind fast-moving objects). The Frame is passed TYPED - the
+          // NativeBuffer pointer contract is only for react-native-webgpu,
+          // which has no VisionCamera dependency. ---
+          const depth = nitro.analyzeSync(frame, rotationDeg, controlsNow.handControl)
           let reset = 0
           let depthAccessed = false
           if (depth.seq >= 0 && depth.seq !== box.lastDepthSeq && depth.surfacePointer !== 0n) {

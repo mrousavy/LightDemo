@@ -17,6 +17,8 @@ Pod::Spec.new do |s|
   }
 
   s.frameworks = ["CoreML", "Vision", "Accelerate", "CoreVideo", "ImageIO", "UniformTypeIdentifiers"]
+  # Typed VisionCamera Frame handoff (HybridFrameSpec -> NativeFrame).
+  s.dependency "VisionCamera"
 
   # The per-frame pixel loops (f16 conversion, percentile histogram) run for
   # every depth inference; at -Onone (Debug) they cost ~17ms/frame, optimized

@@ -1,4 +1,5 @@
-import type { HybridObject, UInt64 } from 'react-native-nitro-modules'
+import type { HybridObject } from 'react-native-nitro-modules'
+import type { Frame } from 'react-native-vision-camera'
 import type { DepthResult } from '../types/DepthResult'
 import type { HandResult } from '../types/HandResult'
 import type { LightControls } from '../types/LightControls'
@@ -45,14 +46,15 @@ export interface LightPipeline
    * depth-model input buffer, so its coordinates come back directly in the
    * crop space shared with the depth map.
    *
-   * {@linkcode pointer} is a `CVPixelBufferRef` from VisionCamera's
-   * `frame.getNativeBuffer().pointer` (retained +1 by the caller; the caller
-   * may `release()` right after this returns). {@linkcode orientationDegrees}
-   * is the rotation needed to display the buffer upright (up=0, right=90,
+   * Takes the VisionCamera {@linkcode Frame} directly (typed, first-class -
+   * this library declares its react-native-vision-camera dependency; the
+   * untyped NativeBuffer pointer contract is only for dependency-free
+   * consumers like react-native-webgpu). {@linkcode orientationDegrees} is
+   * the rotation needed to display the buffer upright (up=0, right=90,
    * down=180, left=270).
    */
   analyzeSync(
-    pointer: UInt64,
+    frame: Frame,
     orientationDegrees: number,
     runHands: boolean
   ): DepthResult

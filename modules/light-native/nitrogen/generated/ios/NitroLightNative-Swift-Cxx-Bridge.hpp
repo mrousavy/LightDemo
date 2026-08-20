@@ -12,6 +12,8 @@
 namespace margelo::nitro::lightnative { struct DepthResult; }
 // Forward declaration of `HandResult` to properly resolve imports.
 namespace margelo::nitro::lightnative { struct HandResult; }
+// Forward declaration of `HybridFrameSpec` to properly resolve imports.
+namespace margelo::nitro::camera { class HybridFrameSpec; }
 // Forward declaration of `HybridLightNativeSpec` to properly resolve imports.
 namespace margelo::nitro::lightnative { class HybridLightNativeSpec; }
 // Forward declaration of `HybridLightPipelineSpec` to properly resolve imports.
@@ -22,6 +24,8 @@ namespace margelo::nitro::lightnative { struct LightControls; }
 namespace margelo::nitro::lightnative { struct LightStatus; }
 
 // Forward declarations of Swift defined types
+// Forward declaration of `HybridFrameSpec_cxx` to properly resolve imports.
+namespace VisionCamera { class HybridFrameSpec_cxx; }
 // Forward declaration of `HybridLightNativeSpec_cxx` to properly resolve imports.
 namespace NitroLightNative { class HybridLightNativeSpec_cxx; }
 // Forward declaration of `HybridLightPipelineSpec_cxx` to properly resolve imports.
@@ -37,6 +41,7 @@ namespace NitroLightNative { class HybridLightPipelineSpec_cxx; }
 #include <NitroModules/Promise.hpp>
 #include <NitroModules/PromiseHolder.hpp>
 #include <NitroModules/Result.hpp>
+#include <VisionCamera/HybridFrameSpec.hpp>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -198,6 +203,18 @@ namespace margelo::nitro::lightnative::bridge::swift {
   inline Result_bool_ create_Result_bool_(const std::exception_ptr& error) noexcept {
     return Result<bool>::withError(error);
   }
+  
+  // pragma MARK: std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>
+  /**
+   * Specialized version of `std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>`.
+   */
+  using std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_ = std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>;
+  std::shared_ptr<margelo::nitro::camera::HybridFrameSpec> create_std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_(void* NON_NULL swiftUnsafePointer) noexcept;
+  void* NON_NULL get_std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_(std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_ cppType);
+  
+  // pragma MARK: std::weak_ptr<margelo::nitro::camera::HybridFrameSpec>
+  using std__weak_ptr_margelo__nitro__camera__HybridFrameSpec_ = std::weak_ptr<margelo::nitro::camera::HybridFrameSpec>;
+  inline std__weak_ptr_margelo__nitro__camera__HybridFrameSpec_ weakify_std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_(const std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>& strong) noexcept { return strong; }
   
   // pragma MARK: std::vector<double>
   /**

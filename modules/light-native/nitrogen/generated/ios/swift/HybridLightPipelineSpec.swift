@@ -5,6 +5,7 @@
 /// Copyright © Marc Rousavy @ Margelo
 ///
 
+import VisionCamera
 import NitroModules
 
 /// See ``HybridLightPipelineSpec``
@@ -15,7 +16,7 @@ public protocol HybridLightPipelineSpec_protocol: HybridObject {
   var lastFaceRollDegrees: Double { get }
 
   // Methods
-  func analyzeSync(pointer: UInt64, orientationDegrees: Double, runHands: Bool) throws -> DepthResult
+  func analyzeSync(frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool) throws -> DepthResult
   func getDepthResult() throws -> DepthResult
   func getHandResult() throws -> HandResult
   func sampleDepthMax(points: [Double]) throws -> Double

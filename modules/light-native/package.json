@@ -8,7 +8,8 @@
     "specs": "nitrogen --log-level info"
   },
   "peerDependencies": {
-    "react-native-nitro-modules": "*"
+    "react-native-nitro-modules": "*",
+    "react-native-vision-camera": "*"
   },
   "peerDependenciesMeta": {
     "react-native-nitro-modules": {
@@ -16,6 +17,7 @@
     }
   },
   "devDependencies": {
-    "nitrogen": "0.37.0"
+    "nitrogen": "0.37.0",
+    "react-native-vision-camera": "5.2.2"
   }
 }
