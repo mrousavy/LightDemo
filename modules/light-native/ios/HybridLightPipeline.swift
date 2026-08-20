@@ -35,9 +35,15 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   }()
   private let sequenceHandler = VNSequenceRequestHandler()
 
-  // The latest CoreML output pixel buffer (single-channel f16, IOSurface-
-  // backed). Retained so JS can zero-copy import its IOSurface into WebGPU;
-  // replaced (and the previous one released) on the next inference.
+  // One persistent IOSurface-backed output buffer, handed to CoreML via
+  // MLPredictionOptions.outputBackings - the model writes depth into the
+  // SAME surface every frame, so the consumer can import it into WebGPU
+  // once and reuse the texture. `latestOutput` normally IS `outputBuffer`;
+  // it only differs if CoreML ever rejects the backing.
+  private let outputBuffer: CVPixelBuffer
+  private let modelOutputName: String
+  private let predictionOptions: MLPredictionOptions
+
   private let lock = NSLock()
   private var latestOutput: CVPixelBuffer?
   private var depthSeq: Int = -1
@@ -75,6 +81,32 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     self.modelInputName = inputName
     self.modelWidth = inputWidth
     self.modelHeight = inputHeight
+
+    guard let outputName = model.modelDescription.outputDescriptionsByName.first(where: {
+      $0.value.type == .image
+    })?.key else {
+      throw RuntimeError.error(withMessage: "Depth model has no image output")
+    }
+    self.modelOutputName = outputName
+    let outputAttributes: [CFString: Any] = [
+      kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+      kCVPixelBufferMetalCompatibilityKey: true,
+    ]
+    var output: CVPixelBuffer?
+    CVPixelBufferCreate(
+      kCFAllocatorDefault, inputWidth, inputHeight,
+      kCVPixelFormatType_OneComponent16Half,
+      outputAttributes as CFDictionary, &output)
+    guard let output else {
+      throw RuntimeError.error(withMessage: "Failed to allocate depth output buffer")
+    }
+    self.outputBuffer = output
+    let options = MLPredictionOptions()
+    if #available(iOS 16.0, *) {
+      options.outputBackings = [outputName: output]
+    }
+    self.predictionOptions = options
+
     self.latestHand = HandResult(
       seq: -1, tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
       midX: 0, midY: 0, pinchRatio: 1, confidence: 0, detectionTimeMs: 0)
@@ -193,14 +225,14 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     do {
       let provider = try MLDictionaryFeatureProvider(
         dictionary: [modelInputName: MLFeatureValue(pixelBuffer: input)])
-      let prediction = try mlModel.prediction(from: provider)
-      guard let buffer = prediction.featureNames
-        .compactMap({ prediction.featureValue(for: $0)?.imageBufferValue })
-        .first
+      let prediction = try mlModel.prediction(from: provider, options: predictionOptions)
+      guard let buffer = prediction.featureValue(for: modelOutputName)?.imageBufferValue
       else {
         print("[LightPipeline] depth: prediction has no image output")
         return
       }
+      // Normally `buffer` IS our outputBacking; CoreML falls back to its own
+      // pool only if the backing is unusable.
       output = buffer
     } catch {
       print("[LightPipeline] depth inference failed: \(error)")

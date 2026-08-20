@@ -317,6 +317,13 @@ function LightView() {
       velX: 0,
       velY: 0,
       lostFrames: 0,
+      // Cached zero-copy depth import, keyed by the IOSurface pointer. With
+      // CoreML output backings the pointer is stable, so the import and
+      // bind group happen once and only the access window is per-frame.
+      depthPtr: 0n as bigint,
+      depthMemory: null as GPUSharedTextureMemory | null,
+      depthTexture: null as GPUTexture | null,
+      depthBindGroup: null as GPUBindGroup | null,
     }),
     [],
   )
@@ -386,8 +393,7 @@ function LightView() {
             controlsNow.handControl,
           )
           let reset = 0
-          let depthMemory: GPUSharedTextureMemory | null = null
-          let depthTexture: GPUTexture | null = null
+          let depthAccessed = false
           if (depth.seq >= 0 && depth.seq !== box.lastDepthSeq && depth.surfacePointer !== 0n) {
             box.lastDepthSeq = depth.seq
             if (!box.rangeInitialized) {
@@ -411,28 +417,34 @@ function LightView() {
             cpF32[5] = box.rangeHigh
             device.queue.writeBuffer(pipeline.computeParamsBuffer, 0, computeParams)
 
-            // Zero-copy: import CoreML's output IOSurface (r16float) as a
-            // texture - the depth map never leaves the GPU.
-            const memory = device.importSharedTextureMemory({
-              handle: depth.surfacePointer,
-              label: 'depth-f16',
-            })
-            const texture = memory.createTexture()
-            memory.beginAccess(texture, true)
-            depthMemory = memory
-            depthTexture = texture
-            const depthPrepareBindGroup = device.createBindGroup({
-              layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
-              entries: [
-                { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
-                { binding: 1, resource: texture.createView() },
-                { binding: 2, resource: { buffer: pipeline.historyBuffer } },
-              ],
-            })
+            // Zero-copy: CoreML writes depth into ONE persistent IOSurface
+            // (outputBackings), imported here once and reused - only the
+            // begin/end access window is per-frame.
+            if (box.depthPtr !== depth.surfacePointer || box.depthTexture == null) {
+              box.depthTexture?.destroy()
+              const memory = device.importSharedTextureMemory({
+                handle: depth.surfacePointer,
+                label: 'depth-f16',
+              })
+              const texture = memory.createTexture()
+              box.depthMemory = memory
+              box.depthTexture = texture
+              box.depthPtr = depth.surfacePointer
+              box.depthBindGroup = device.createBindGroup({
+                layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
+                entries: [
+                  { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
+                  { binding: 1, resource: texture.createView() },
+                  { binding: 2, resource: { buffer: pipeline.historyBuffer } },
+                ],
+              })
+            }
+            box.depthMemory!.beginAccess(box.depthTexture!, true)
+            depthAccessed = true
 
             const compute = encoder.beginComputePass()
             compute.setPipeline(pipeline.depthPreparePipeline)
-            compute.setBindGroup(0, depthPrepareBindGroup)
+            compute.setBindGroup(0, box.depthBindGroup!)
             compute.dispatchWorkgroups(Math.ceil((pipeline.depthW * pipeline.depthH) / 64))
             compute.setPipeline(pipeline.surfacePipeline)
             compute.setBindGroup(0, pipeline.surfaceBindGroup)
@@ -664,9 +676,8 @@ function LightView() {
           device.queue.submit([encoder.finish()])
           pipeline.context.present()
           externalTexture.destroy()
-          if (depthMemory != null && depthTexture != null) {
-            depthMemory.endAccess(depthTexture)
-            depthTexture.destroy()
+          if (depthAccessed) {
+            box.depthMemory!.endAccess(box.depthTexture!)
           }
 
           // --- stats ---
