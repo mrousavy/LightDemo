@@ -274,26 +274,44 @@ function LightView() {
   // and the session still reports running (verified via thread sample: the
   // frame thread just idles waiting for work). Detect a frozen frameCount
   // and bounce the session via isActive.
+  //
+  // Gentle by design: external cameras can take several seconds to deliver
+  // their first frame after a session (re)start, so each restart gets a
+  // 12s grace period, and repeated restarts back off exponentially -
+  // aggressive stop/start churn can prevent a recovering camera from ever
+  // coming up (and stresses flaky UVC drivers).
   const [cameraSuspended, setCameraSuspended] = useState(false)
-  const watchdog = useMemo(() => ({ lastCount: -1, stalledTicks: 0 }), [])
+  const watchdog = useMemo(
+    () => ({
+      lastCount: -1,
+      stalledMs: 0,
+      graceUntil: Date.now() + 15000,
+      backoffMs: 5000,
+    }),
+    [],
+  )
   useEffect(() => {
     if (nitro == null || pipeline == null) return
     const interval = setInterval(() => {
       const count = nitro.getStatus().frameCount
-      // NOTE: also triggers at count 0 - a wedged external camera can stall
-      // after delivering a single frame (status is only written every 15).
-      if (count === watchdog.lastCount && !cameraSuspended) {
-        watchdog.stalledTicks += 1
-        if (watchdog.stalledTicks >= 2) {
+      if (count !== watchdog.lastCount) {
+        // Frames are flowing - reset stall tracking and backoff.
+        watchdog.stalledMs = 0
+        watchdog.backoffMs = 5000
+      } else if (!cameraSuspended && Date.now() > watchdog.graceUntil) {
+        watchdog.stalledMs += 2000
+        if (watchdog.stalledMs >= watchdog.backoffMs) {
           console.log(
-            `[LightDemo] camera stall detected (frameCount frozen at ${count}) - restarting session`,
+            `[LightDemo] camera stall (frameCount frozen at ${count} for ` +
+              `${watchdog.stalledMs / 1000}s) - restarting session ` +
+              `(next attempt in ${(watchdog.backoffMs * 2) / 1000}s)`,
           )
-          watchdog.stalledTicks = 0
+          watchdog.stalledMs = 0
+          watchdog.backoffMs = Math.min(watchdog.backoffMs * 2, 40000)
+          watchdog.graceUntil = Date.now() + 12000
           setCameraSuspended(true)
           setTimeout(() => setCameraSuspended(false), 600)
         }
-      } else {
-        watchdog.stalledTicks = 0
       }
       watchdog.lastCount = count
     }, 2000)
