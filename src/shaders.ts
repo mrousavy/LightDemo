@@ -12,7 +12,9 @@
 
 const CONSTANTS = /* wgsl */ `
 const TEMPORAL_ALPHA = 0.32;
-const MOTION_ALPHA = 0.8;
+// Original demo uses 0.8; raised so fast-moving objects leave less of a
+// residual lighting trail (20% -> 8% of the previous depth under motion).
+const MOTION_ALPHA = 0.92;
 const MOTION_LOW = 0.02;
 const MOTION_HIGH = 0.09;
 
