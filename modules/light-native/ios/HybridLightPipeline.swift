@@ -42,9 +42,25 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private let handRequest: VNDetectHumanHandPoseRequest = {
     let request = VNDetectHumanHandPoseRequest()
     request.maximumHandCount = 2
+    // Pin Vision's hand-pose networks OFF the Neural Engine: they otherwise
+    // schedule onto it and CONTEND with our depth prediction running
+    // concurrently (hands wall time ballooned 17.6ms -> 33ms overlapped).
+    if #available(iOS 17.0, *) {
+      let cpu = MLComputeDevice.allComputeDevices.first(where: {
+        if case .cpu = $0 { return true }
+        return false
+      })
+      if let cpu {
+        request.setComputeDevice(cpu, for: .main)
+        request.setComputeDevice(cpu, for: .postProcessing)
+      }
+    }
     return request
   }()
   private let sequenceHandler = VNSequenceRequestHandler()
+  /// Runs Vision hand detection concurrently with the ANE depth prediction
+  /// inside analyzeSync (joined before it returns).
+  private let handQueue = DispatchQueue(label: "com.mrousavy.lightdemo.hands", qos: .userInteractive)
 
   // One persistent IOSurface-backed output buffer, handed to CoreML via
   // MLPredictionOptions.outputBackings - the model writes depth into the
@@ -141,12 +157,29 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     }
     let orientation = Self.cgOrientation(fromDegrees: Int(orientationDegrees))
 
-    runDepthInference(on: pixelBuffer, orientation: orientation)
-    if runHands, let input = inputBuffer {
-      // The prepared model input is already upright + center-cropped, so
-      // hand landmarks come back directly in the shared crop space - and
-      // Vision runs on 392x392 instead of the full camera frame.
-      detectHands(onPreparedInput: input)
+    // Prepare the shared model input once (upright + center-cropped), then
+    // run the ANE depth prediction and Vision hand detection CONCURRENTLY:
+    // depth occupies the Neural Engine while hands run on CPU, and both
+    // only READ the prepared buffer. The join before returning keeps the
+    // API fully synchronous - the frame just stops paying for the two
+    // serially (at 448x336 that is 29.7ms + 17.6ms -> ~31ms).
+    let start = CACurrentMediaTime()
+    guard let input = prepareModelInput(from: pixelBuffer, orientation: orientation) else {
+      print("[LightPipeline] depth: failed to prepare model input")
+      return try getDepthResult()
+    }
+    let prepDone = CACurrentMediaTime()
+    if runHands {
+      let group = DispatchGroup()
+      group.enter()
+      handQueue.async { [self] in
+        detectHands(onPreparedInput: input)
+        group.leave()
+      }
+      predictDepth(on: input, start: start, prepDone: prepDone)
+      group.wait()
+    } else {
+      predictDepth(on: input, start: start, prepDone: prepDone)
     }
 
     return try getDepthResult()
@@ -205,15 +238,9 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     return target
   }
 
-  private func runDepthInference(
-    on pixelBuffer: CVPixelBuffer, orientation: CGImagePropertyOrientation
+  private func predictDepth(
+    on input: CVPixelBuffer, start: CFTimeInterval, prepDone: CFTimeInterval
   ) {
-    let start = CACurrentMediaTime()
-    guard let input = prepareModelInput(from: pixelBuffer, orientation: orientation) else {
-      print("[LightPipeline] depth: failed to prepare model input")
-      return
-    }
-    let prepDone = CACurrentMediaTime()
     let output: CVPixelBuffer
     do {
       if inputProvider == nil {
