@@ -539,43 +539,47 @@ function LightView() {
             if (hand.hand1.tracked && hand.hand1.confidence > 0.45) hands.push(hand.hand1)
             if (hand.hand2.tracked && hand.hand2.confidence > 0.45) hands.push(hand.hand2)
             if (hands.length > 0) {
+              // Classify once in display space. Semantics (per UX spec):
+              // - a pinched hand ALWAYS wins (no proximity requirement)
+              // - no pinch: drift to the hand, or the center between both
+              // - both pinched: the one nearer the light
+              // - continuity of a grab is anchored to the LOCKED hand's last
+              //   position, never to the light (at the two-hand center,
+              //   nearest-to-light is a coin flip onto the open hand, which
+              //   caused a grab/release/jump loop)
+              const detail = []
+              for (const h of hands) {
+                detail.push({
+                  h: h,
+                  x: mirrored ? 1 - h.midX : h.midX,
+                  y: h.midY,
+                  pinched: h.pinchRatio < 0.28,
+                  open: h.pinchRatio > 0.42,
+                })
+              }
+              const pinched = detail.filter((d) => d.pinched)
+
               if (!box.grabbed) {
-                // Hover-steering (like the TypeGPU demo's pointer): drift
-                // toward the visible hand - or the CENTER between both
-                // hands when two are visible.
-                let cx = 0
-                let cy = 0
-                for (const h of hands) {
-                  cx += mirrored ? 1 - h.midX : h.midX
-                  cy += h.midY
-                }
-                cx /= hands.length
-                cy /= hands.length
-                if (!controlsNow.touchActive) {
-                  box.everControlled = true
-                  box.lightX += (cx - box.lightX) * 0.06
-                  box.lightY += (cy - box.lightY) * 0.06
-                  freshHandUpdate = true
-                }
-                // Engage: ANY pinching hand near the light locks the grab
-                // onto that hand.
-                let engaging = false
-                for (const h of hands) {
-                  const hx = mirrored ? 1 - h.midX : h.midX
-                  const dx = hx - box.lightX
-                  const dy = h.midY - box.lightY
-                  if (h.pinchRatio < 0.28 && dx * dx + dy * dy < 0.3 * 0.3) {
-                    engaging = true
-                    break
-                  }
-                }
-                if (engaging) {
+                if (pinched.length > 0) {
+                  // A pinch anywhere claims the light.
                   box.pinchFrames += 1
                   if (box.pinchFrames >= 2) {
+                    let target = pinched[0]
+                    let best = Number.POSITIVE_INFINITY
+                    for (const d of pinched) {
+                      const dist = (d.x - box.lightX) ** 2 + (d.y - box.lightY) ** 2
+                      if (dist < best) {
+                        best = dist
+                        target = d
+                      }
+                    }
                     box.grabbed = true
                     box.everControlled = true
                     box.releaseFrames = 0
-                    box.handValid = false
+                    box.handX = target.x
+                    box.handY = target.y
+                    box.handValid = true
+                    box.outlierCount = 0
                     // Re-reference the proximity control at each grab: z
                     // moves relative to the hand's size at THIS grab.
                     box.grabRefSize = 0
@@ -583,22 +587,44 @@ function LightView() {
                   }
                 } else {
                   box.pinchFrames = 0
-                }
-              } else {
-                // Locked hand = whichever visible hand is closest to the
-                // light (we follow it, so it stays closest).
-                let locked = hands[0]
-                let bestDistance = Number.POSITIVE_INFINITY
-                for (const h of hands) {
-                  const hx = mirrored ? 1 - h.midX : h.midX
-                  const d = (hx - box.lightX) ** 2 + (h.midY - box.lightY) ** 2
-                  if (d < bestDistance) {
-                    bestDistance = d
-                    locked = h
+                  // Hover-steering: drift toward the hand(s) center.
+                  if (!controlsNow.touchActive) {
+                    let cx = 0
+                    let cy = 0
+                    for (const d of detail) {
+                      cx += d.x
+                      cy += d.y
+                    }
+                    cx /= detail.length
+                    cy /= detail.length
+                    box.everControlled = true
+                    box.lightX += (cx - box.lightX) * 0.06
+                    box.lightY += (cy - box.lightY) * 0.06
+                    freshHandUpdate = true
                   }
                 }
-                const rawX = mirrored ? 1 - locked.midX : locked.midX
-                const rawY = locked.midY
+              }
+              if (box.grabbed) {
+                // Continuity: the locked hand is the one nearest the last
+                // locked position...
+                let locked = detail[0]
+                let bestDistance = Number.POSITIVE_INFINITY
+                for (const d of detail) {
+                  const dist = (d.x - box.handX) ** 2 + (d.y - box.handY) ** 2
+                  if (dist < bestDistance) {
+                    bestDistance = dist
+                    locked = d
+                  }
+                }
+                // ...unless it opened while another hand is pinched: the
+                // pinched hand takes the grab over (pinched wins).
+                if (locked.open && pinched.length > 0 && pinched.indexOf(locked) < 0) {
+                  locked = pinched[0]
+                  box.handX = locked.x
+                  box.handY = locked.y
+                }
+                const rawX = locked.x
+                const rawY = locked.y
                 // Reject single-frame teleports of the locked hand (Vision
                 // jitters under motion blur).
                 const jump = box.handValid
@@ -617,7 +643,7 @@ function LightView() {
                     box.handY = rawY
                     box.handValid = true
                   }
-                  if (locked.pinchRatio > 0.42) {
+                  if (locked.open) {
                     box.releaseFrames += 1
                     if (box.releaseFrames >= 2) {
                       box.grabbed = false
@@ -655,9 +681,9 @@ function LightView() {
                   //    farther pulls it deeper - intuitive at any seating
                   //    distance, no calibration constants.
                   const nearest = nitro.sampleDepthMax([
-                    locked.thumbX, locked.thumbY,
-                    locked.indexX, locked.indexY,
-                    locked.midX, locked.midY,
+                    locked.h.thumbX, locked.h.thumbY,
+                    locked.h.indexX, locked.h.indexY,
+                    locked.h.midX, locked.h.midY,
                   ])
                   if (nearest >= 0) {
                     const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
@@ -671,11 +697,11 @@ function LightView() {
                         ? zSample
                         : Math.max(zSample, box.zSceneEnvelope - 0.02)
                   }
-                  if (locked.handSize > 0) {
+                  if (locked.h.handSize > 0) {
                     box.handSizeSmoothed =
                       box.handSizeSmoothed <= 0
-                        ? locked.handSize
-                        : box.handSizeSmoothed + (locked.handSize - box.handSizeSmoothed) * 0.3
+                        ? locked.h.handSize
+                        : box.handSizeSmoothed + (locked.h.handSize - box.handSizeSmoothed) * 0.3
                     if (box.grabRefSize <= 0) box.grabRefSize = box.handSizeSmoothed
                   }
                   let sizeOffset = 0
