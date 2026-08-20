@@ -24,8 +24,18 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   // Direct-CoreML preprocessing: GPU center-crop + scale into a reusable
   // BGRA buffer (Vision's VNCoreMLRequest costs ~23ms extra per frame on
   // the same model - measured 40ms vs 16.6ms direct on this M1 Max).
-  private let ciContext = CIContext(options: [.cacheIntermediates: false])
+  // No color management (the model wants raw pixel values, and the working-
+  // space conversion is pure overhead) + intermediate caching for repeated
+  // identical graphs.
+  private let ciContext = CIContext(options: [
+    .workingColorSpace: NSNull(),
+    .cacheIntermediates: true,
+  ])
   private var inputBuffer: CVPixelBuffer?
+  // Reused every prediction: MLFeatureValue holds the pixel buffer by
+  // reference, so CoreML sees the freshly rendered contents each frame
+  // without per-frame provider/NSObject allocations.
+  private var inputProvider: MLDictionaryFeatureProvider?
 
   // Persistent Vision objects: VNSequenceRequestHandler caches state across
   // video frames and avoids the per-frame handler setup cost.
@@ -229,9 +239,11 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     let prepDone = CACurrentMediaTime()
     let output: CVPixelBuffer
     do {
-      let provider = try MLDictionaryFeatureProvider(
-        dictionary: [modelInputName: MLFeatureValue(pixelBuffer: input)])
-      let prediction = try mlModel.prediction(from: provider, options: predictionOptions)
+      if inputProvider == nil {
+        inputProvider = try MLDictionaryFeatureProvider(
+          dictionary: [modelInputName: MLFeatureValue(pixelBuffer: input)])
+      }
+      let prediction = try mlModel.prediction(from: inputProvider!, options: predictionOptions)
       guard let buffer = prediction.featureValue(for: modelOutputName)?.imageBufferValue
       else {
         print("[LightPipeline] depth: prediction has no image output")

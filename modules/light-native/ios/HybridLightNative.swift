@@ -38,6 +38,16 @@ final class HybridLightNative: HybridLightNativeSpec {
     } else {
       configuration.computeUnits = .all
     }
+    // Trade specialization/load cost for lower prediction latency, and tell
+    // CoreML the input shape never changes.
+    if #available(iOS 17.4, *) {
+      var hints = MLOptimizationHints()
+      hints.reshapeFrequency = .infrequent
+      if #available(iOS 18.0, *) {
+        hints.specializationStrategy = .fastPrediction
+      }
+      configuration.optimizationHints = hints
+    }
 
     let bundle = modelsBundle()
     // Preferred: the resource-bundle target already compiled the .mlpackage.
