@@ -197,8 +197,8 @@ function LightView() {
 
     const depthW = nitro.depthWidth
     const depthH = nitro.depthHeight
-    const fieldW = depthW * 4
-    const fieldH = depthH * 4
+    const fieldW = depthW * 3
+    const fieldH = depthH * 3
     const fieldTexelCount = fieldW * fieldH
 
     const depthPrepareModule = device.createShaderModule({ code: DEPTH_PREPARE_SHADER })

@@ -62,7 +62,7 @@ final class HybridLightNative: HybridLightNativeSpec {
     let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
     // Cache key includes the input size so swapping the bundled model never
     // resurrects a stale compiled cache.
-    let cachedURL = caches.appendingPathComponent("DepthAnythingV2Small-336x252.mlmodelc")
+    let cachedURL = caches.appendingPathComponent("DepthAnythingV2Small-448x336.mlmodelc")
     if FileManager.default.fileExists(atPath: cachedURL.path) {
       return try MLModel(contentsOf: cachedURL, configuration: configuration)
     }
