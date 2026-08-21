@@ -1,4 +1,5 @@
 const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
+const { getBundleModeMetroConfig } = require('react-native-worklets/bundleMode');
 
 const defaultConfig = getDefaultConfig(__dirname);
 
@@ -16,4 +17,6 @@ const config = {
   },
 };
 
-module.exports = mergeConfig(defaultConfig, config);
+// Worklets bundleMode (required for TypeGPU resource transfer into the frame
+// worklet) needs its Metro resolver/serializer hooks.
+module.exports = getBundleModeMetroConfig(mergeConfig(defaultConfig, config));

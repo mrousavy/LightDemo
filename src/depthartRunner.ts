@@ -1,4 +1,9 @@
 import { Image } from 'react-native'
+// Side effect: registers TypeGPU's worklet serializers with
+// react-native-worklets so roots/pipelines/bind groups/buffers can be
+// captured by the frame worklet (@typegpu/react's react-native entry calls
+// registerTypegpuReactSerializables at import time).
+import '@typegpu/react'
 import { d, std, tgpu } from 'typegpu'
 import type {
   StorageFlag,
@@ -44,7 +49,7 @@ const handMaxDisparity = (first: number, count: number) => {
   'use gpu'
   const params = probeLayout.$.params
   let best = d.f32(-1)
-  for (const i of std.range(count)) {
+  for (let i = d.i32(0); i < count; i++) {
     const point = params.points[first + i]
     const x = std.clamp(
       d.u32(point.x * d.f32(params.outputSize.x)),

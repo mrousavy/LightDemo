@@ -15,6 +15,10 @@ const workletsPluginOptions = {
 module.exports = {
   presets: ['module:@react-native/babel-preset'],
   plugins: [
+    // typegpu's barrel file uses `export * as ns` which the RN preset does
+    // not transform early enough.
+    '@babel/plugin-transform-export-namespace-from',
+    '@babel/plugin-transform-class-static-block',
     'unplugin-typegpu/babel',
     ['react-native-worklets/plugin', workletsPluginOptions],
   ],

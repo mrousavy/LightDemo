@@ -38,6 +38,9 @@ const REQUIRED_FEATURES: GPUFeatureName[] = [
   'dawn-multi-planar-formats' as GPUFeatureName,
   // DepthART's fp16 'balanced' weight bundle runs in f16 compute.
   'shader-f16' as GPUFeatureName,
+  // The frame worklet and the main thread (hand-probe readback) both submit
+  // to the device; this makes Dawn mutex it internally.
+  'implicit-device-synchronization' as GPUFeatureName,
 ]
 
 // Unified z-space, MUST match SURFACE_FAR_Z in shaders.ts: normalized
@@ -459,12 +462,33 @@ function LightView() {
         .read()
         .then((v) => {
           if (live) gpuDepth.setBlocking({ h1: v.x, h2: v.y, low: v.z, high: v.w })
+          ;(globalThis as Record<string, unknown>).__gpuDepth = { h1: v.x, h2: v.y, low: v.z, high: v.w }
         })
         .catch(() => {})
         .finally(() => {
           busy = false
         })
     }, 33)
+    // Debug: dump the model INPUT tensor (what DepthART actually sees).
+    ;(globalThis as Record<string, unknown>).__dumpInput = async (outPath: string) => {
+      const W = depthart.depthW
+      const H = depthart.depthH
+      const input = await (
+        depthart.preprocess.output as unknown as {
+          read(): Promise<{ x: number; y: number; z: number }[]>
+        }
+      ).read()
+      const rgba = new Uint8Array(W * H * 4)
+      for (let i = 0; i < W * H; i++) {
+        const v = input[i]!
+        rgba[i * 4] = Math.max(0, Math.min(255, (v.x * 0.229 + 0.485) * 255))
+        rgba[i * 4 + 1] = Math.max(0, Math.min(255, (v.y * 0.224 + 0.456) * 255))
+        rgba[i * 4 + 2] = Math.max(0, Math.min(255, (v.z * 0.225 + 0.406) * 255))
+        rgba[i * 4 + 3] = 255
+      }
+      await LightNativeModule.savePng(outPath, W, H, W * 4, false, rgba.buffer as ArrayBuffer)
+      return 'saved'
+    }
     return () => {
       live = false
       clearInterval(interval)
