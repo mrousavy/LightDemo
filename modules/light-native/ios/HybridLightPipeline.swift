@@ -401,30 +401,41 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
 
   private static let emptyHand = TrackedHand(
     tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
-    midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0, disparity: -1)
+    midX: 0, midY: 0, wristX: 0, wristY: 0, mcpX: 0, mcpY: 0,
+    pinchRatio: 1, handSize: 0, confidence: 0, disparity: -1)
 
   /// Extract a TrackedHand from a Vision observation. The input already IS
   /// the upright center crop, so only the y-flip is needed (Vision uses a
   /// bottom-left origin).
+  ///
+  /// Gating is PALM-first: the hand only needs a confident wrist +
+  /// middle-MCP (they define the seed ROI's center, size and rotation for
+  /// the GPU tracker). Thumb/index tips merely refine the pinch readout -
+  /// a fist or an edge-on hand with curled fingers must still SEED.
   private static func extractHand(
     _ hand: VNHumanHandPoseObservation
   ) -> (hand: TrackedHand, probes: [CGPoint])? {
-    guard let thumb = try? hand.recognizedPoint(.thumbTip),
-          let index = try? hand.recognizedPoint(.indexTip),
-          let wrist = try? hand.recognizedPoint(.wrist),
+    guard let wrist = try? hand.recognizedPoint(.wrist),
           let middleMCP = try? hand.recognizedPoint(.middleMCP),
-          thumb.confidence > 0.3, index.confidence > 0.3
+          wrist.confidence > 0.3, middleMCP.confidence > 0.3
     else { return nil }
-    let thumbX = Double(thumb.location.x)
-    let thumbY = Double(1 - thumb.location.y)
-    let indexX = Double(index.location.x)
-    let indexY = Double(1 - index.location.y)
-    let handSize = max(
-      hypot(wrist.location.x - middleMCP.location.x,
-            wrist.location.y - middleMCP.location.y),
-      1e-4)
-    let pinchDistance = hypot(thumb.location.x - index.location.x,
-                              thumb.location.y - index.location.y)
+    let wristX = Double(wrist.location.x)
+    let wristY = Double(1 - wrist.location.y)
+    let mcpX = Double(middleMCP.location.x)
+    let mcpY = Double(1 - middleMCP.location.y)
+    let handSize = max(hypot(wristX - mcpX, wristY - mcpY), 1e-4)
+
+    let thumb = try? hand.recognizedPoint(.thumbTip)
+    let index = try? hand.recognizedPoint(.indexTip)
+    let hasPinch = (thumb?.confidence ?? 0) > 0.3 && (index?.confidence ?? 0) > 0.3
+    // Without confident fingertips, park the pinch points on the MCP and
+    // report "open" - the GPU tracker replaces all of this next frame.
+    let thumbX = hasPinch ? Double(thumb!.location.x) : mcpX
+    let thumbY = hasPinch ? Double(1 - thumb!.location.y) : mcpY
+    let indexX = hasPinch ? Double(index!.location.x) : mcpX
+    let indexY = hasPinch ? Double(1 - index!.location.y) : mcpY
+    let pinchRatio = hasPinch ? hypot(thumbX - indexX, thumbY - indexY) / handSize : 1.0
+
     // Every confident landmark (y-flipped into crop space) for the robust
     // hand-depth probe in attachHandDepth().
     var probes: [CGPoint] = []
@@ -437,9 +448,10 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       tracked: true, thumbX: thumbX, thumbY: thumbY,
       indexX: indexX, indexY: indexY,
       midX: (thumbX + indexX) / 2, midY: (thumbY + indexY) / 2,
-      pinchRatio: Double(pinchDistance / handSize),
+      wristX: wristX, wristY: wristY, mcpX: mcpX, mcpY: mcpY,
+      pinchRatio: pinchRatio,
       handSize: Double(handSize),
-      confidence: Double(min(thumb.confidence, index.confidence)),
+      confidence: Double(min(wrist.confidence, middleMCP.confidence)),
       disparity: -1)
     return (tracked, probes)
   }
@@ -495,6 +507,8 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
       tracked: hand.tracked, thumbX: hand.thumbX, thumbY: hand.thumbY,
       indexX: hand.indexX, indexY: hand.indexY,
       midX: hand.midX, midY: hand.midY,
+      wristX: hand.wristX, wristY: hand.wristY,
+      mcpX: hand.mcpX, mcpY: hand.mcpY,
       pinchRatio: hand.pinchRatio, handSize: hand.handSize,
       confidence: hand.confidence, disparity: disparity)
   }

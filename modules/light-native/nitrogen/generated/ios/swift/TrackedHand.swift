@@ -18,8 +18,8 @@ public extension TrackedHand {
   /**
    * Create a new instance of `TrackedHand`.
    */
-  init(tracked: Bool, thumbX: Double, thumbY: Double, indexX: Double, indexY: Double, midX: Double, midY: Double, pinchRatio: Double, handSize: Double, confidence: Double, disparity: Double) {
-    self.init(tracked, thumbX, thumbY, indexX, indexY, midX, midY, pinchRatio, handSize, confidence, disparity)
+  init(tracked: Bool, thumbX: Double, thumbY: Double, indexX: Double, indexY: Double, midX: Double, midY: Double, wristX: Double, wristY: Double, mcpX: Double, mcpY: Double, pinchRatio: Double, handSize: Double, confidence: Double, disparity: Double) {
+    self.init(tracked, thumbX, thumbY, indexX, indexY, midX, midY, wristX, wristY, mcpX, mcpY, pinchRatio, handSize, confidence, disparity)
   }
 
   @inline(__always)
@@ -55,6 +55,26 @@ public extension TrackedHand {
   @inline(__always)
   var midY: Double {
     return self.__midY
+  }
+  
+  @inline(__always)
+  var wristX: Double {
+    return self.__wristX
+  }
+  
+  @inline(__always)
+  var wristY: Double {
+    return self.__wristY
+  }
+  
+  @inline(__always)
+  var mcpX: Double {
+    return self.__mcpX
+  }
+  
+  @inline(__always)
+  var mcpY: Double {
+    return self.__mcpY
   }
   
   @inline(__always)

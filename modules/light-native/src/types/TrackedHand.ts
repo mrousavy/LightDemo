@@ -15,6 +15,16 @@ export interface TrackedHand {
   midX: number
   midY: number
   /**
+   * Wrist and middle-finger MCP. These define the hand's palm axis: the
+   * GPU tracker seeds its rotated ROI from them (MediaPipe's landmark
+   * model needs the crop centered on the PALM and rotated hand-up -
+   * unrotated fingertip-centered seeds lose sideways hands immediately).
+   */
+  wristX: number
+  wristY: number
+  mcpX: number
+  mcpY: number
+  /**
    * Distance between thumb tip and index tip, normalized by the hand size.
    * ~0.1-0.25 = pinching, > 0.4 = open.
    */
