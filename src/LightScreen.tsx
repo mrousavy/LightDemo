@@ -68,11 +68,13 @@ const Z_MARGIN = 0.1
 
 const DEFAULT_CONTROLS: LightControls = {
   mirror: true,
-  // Hardcoded upright rotation for the Insta360 Link 2 Pro's current
-  // mounting (verified visually). Cycle the Rot button if it changes;
-  // 'auto' falls back to VisionCamera's tag, which is wrong for external
-  // cameras (derived from the connection's default portrait orientation).
-  rotationOverride: 270,
+  // The Insta360's head is currently PHYSICALLY rotated into vertical
+  // mode (every raw UVC format delivers 90deg-rotated content; verified by
+  // probing 1280x960/1920x1440/3840x2880 under both landscape connection
+  // orientations). 90 displays it upright. Once the head is physically
+  // rotated back to horizontal, press Rot to 0 for the full wide FOV -
+  // the landscape connection plumbing is already in place.
+  rotationOverride: 90,
   mode: 0,
   // Moodier than the TypeGPU defaults (intensity 3.0 / exposure 0.5): a dim
   // base scene with a bright light reads far more dramatic on a well-lit
@@ -448,10 +450,14 @@ function LightView() {
           .map((d) => `"${d.localizedName}" [${d.type}/${d.position}]`)
           .join(', '),
     )
+    // Raw UVC device only. The "Insta360 Virtual Camera" (the Link app's
+    // processed output, what FaceTime shows) cannot be captured from the
+    // iOS-on-Mac AVFoundation stack (-11800/-12780 on session start).
     const device = devices.find(
       (d) =>
         d.type === 'external' &&
         !d.isContinuityCamera &&
+        !d.localizedName.includes('Virtual') &&
         !d.localizedName.includes('NULL'),
     )
     console.log(
@@ -1385,6 +1391,12 @@ function LightView() {
   const frameOutput = useFrameOutput({
     pixelFormat: 'yuv',
     targetResolution: TARGET_RESOLUTION,
+    // REQUIRED for outputOrientation to reach the AVCaptureConnection:
+    // without it the connection keeps its default PORTRAIT orientation and
+    // the Insta360 gimbal physically rotates to match it - delivering
+    // 90deg-rotated buffers whose 4:3 landscape crop threw away 44% of the
+    // vertical FOV (and used the sensor's short axis horizontally).
+    enablePhysicalBufferRotation: true,
     onFrame: onFrame,
     onFrameDropped: onFrameDropped,
   })
@@ -1407,13 +1419,13 @@ function LightView() {
     onConfigured: () => console.log('[LightDemo] camera configured'),
   })
   useEffect(() => {
-    // 'right' maps to AVCaptureVideoOrientation.landscapeLeft. This must be
-    // a LANDSCAPE orientation: VisionCamera maps 'up' to .portrait, and
-    // orientation-capable external cameras (the Insta360 gimbal) physically
-    // rotate their sensor to match the connection's videoOrientation - a
-    // portrait connection cost us 90deg-rotated buffers AND a narrow
-    // portrait crop of the scene (compare FaceTime's wide landscape view).
-    frameOutput.outputOrientation = 'right'
+    // MUST be a LANDSCAPE orientation ('left' -> landscapeRight): with
+    // enablePhysicalBufferRotation the connection actually applies it, and
+    // a portrait connection costs a 90deg-rotated stream and a narrow crop
+    // (compare FaceTime's wide landscape view). 'right' (landscapeLeft)
+    // produced 90deg-rotated content on the Insta360 - its natural
+    // orientation is the other landscape.
+    frameOutput.outputOrientation = 'left'
   }, [frameOutput])
 
   // Square-ish canvas matching the depth model aspect (4:3), centered.
