@@ -89,34 +89,38 @@ export const handProbeKernel = tgpu.computeFn({ workgroupSize: [1] })(() => {
   probeLayout.$.result = d.vec4f(norm1, norm2, low, probeLayout.$.range.y)
 })
 
+// Everything the worklet touches per frame is a PRE-UNWRAPPED raw WebGPU
+// handle: TypeGPU's typed dispatch recording (lazy state objects, layout
+// checks) measured ~6.5ms/frame for the ~270 dispatches in Hermes; raw
+// setPipeline/setBindGroup/dispatchWorkgroups is a fraction of that. The
+// only TypeGPU objects still used per frame are two uniform .write()s.
+export interface RawDispatch {
+  pipeline: GPUComputePipeline
+  bindGroup: GPUBindGroup
+  x: number
+  y: number
+  z: number
+}
+
 export interface DepthartRunner {
   root: TgpuRoot
   depthW: number
   depthH: number
-  // Per-frame inference dispatch list (preprocess is encoded separately).
-  dispatches: readonly {
-    pipeline: TgpuComputePipeline
-    bindGroup: TgpuBindGroup
-    workgroups: { x: number; y?: number; z?: number }
-  }[]
+  dispatches: readonly RawDispatch[]
   preprocess: {
-    pipeline: TgpuComputePipeline
+    pipelineRaw: GPUComputePipeline
+    layoutRaw: GPUBindGroupLayout
     params: TgpuUniform<typeof FrameParams>
-    sampler: TgpuSampler
-    output: TgpuBuffer<d.WgslArray<d.Vec4f>> & StorageFlag
-    layout: typeof preprocessLayout
+    paramsRaw: GPUBuffer
+    samplerRaw: GPUSampler
+    outputRaw: GPUBuffer
     total: number
   }
-  range: {
-    pipelines: readonly TgpuComputePipeline[]
-    bindGroup: TgpuBindGroup
-    workgroups: readonly number[]
-  }
+  range: readonly RawDispatch[]
   probe: {
-    pipeline: TgpuComputePipeline
+    pipelineRaw: GPUComputePipeline
     params: TgpuUniform<typeof ProbeParams>
-    bindGroup: TgpuBindGroup
-    result: TgpuBuffer<d.Vec4f> & StorageFlag
+    bindGroupRaw: GPUBindGroup
   }
   // Raw GPUBuffers for the raw-WebGPU lighting passes.
   disparityRawBuffer: GPUBuffer
@@ -177,25 +181,41 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
     ...uniquePipelines.map((pipeline) => pipeline.initAsync()),
   ])
 
+  const rawDispatches: RawDispatch[] = prepared.dispatches.map((item) => ({
+    pipeline: root.unwrap(item.pipeline),
+    bindGroup: root.unwrap(item.bindGroup),
+    x: item.workgroups.x,
+    y: item.workgroups.y ?? 1,
+    z: item.workgroups.z ?? 1,
+  }))
+  const rangeParts = rangeEstimator.parts
+  const rawRange: RawDispatch[] = rangeParts.pipelines.map((pipeline, i) => ({
+    pipeline: root.unwrap(pipeline),
+    bindGroup: root.unwrap(rangeParts.bindGroup!),
+    x: rangeParts.workgroups[i]!,
+    y: 1,
+    z: 1,
+  }))
+
   return {
     root,
     depthW: inputWidth,
     depthH: inputHeight,
-    dispatches: prepared.dispatches as DepthartRunner['dispatches'],
+    dispatches: rawDispatches,
     preprocess: {
-      pipeline: prePipeline,
+      pipelineRaw: root.unwrap(prePipeline),
+      layoutRaw: root.unwrap(preprocessLayout),
       params: preParams,
-      sampler: preSampler,
-      output: arena.inputBuffer as unknown as DepthartRunner['preprocess']['output'],
-      layout: preprocessLayout,
+      paramsRaw: root.unwrap(preParams.buffer),
+      samplerRaw: root.unwrap(preSampler),
+      outputRaw: arena.inputBuffer.buffer,
       total: inputWidth * inputHeight,
     },
-    range: rangeEstimator.parts as DepthartRunner['range'],
+    range: rawRange,
     probe: {
-      pipeline: probePipeline,
+      pipelineRaw: root.unwrap(probePipeline),
       params: probeParams,
-      bindGroup: probeBindGroup,
-      result: probeResult as DepthartRunner['probe']['result'],
+      bindGroupRaw: root.unwrap(probeBindGroup),
     },
     disparityRawBuffer: arena.outputBuffer.buffer,
     rangeRawBuffer: rangeBuffer.buffer,

@@ -386,28 +386,30 @@ function LightView() {
   }, [])
 
   const devices = useCameraDevices()
-  // Never pick a Continuity Camera (iPhone). Prefer USB/external cameras,
-  // then the built-in front camera. A crashed UVC driver can leave a
-  // phantom "NULL Camera" device behind that fails every session config
-  // with AVFoundation -11800 '!obj' - never select it.
+  // USB/external ONLY. This machine grows odd virtual cameras (Continuity,
+  // a fridge-cam CMIO extension claiming to be a built-in wide angle, the
+  // phantom "NULL Camera" a crashed UVC driver leaves behind) - falling
+  // back to any of them produces an eternal frameless "Starting camera".
+  // useCameraDevices is reactive: when the real USB camera registers, it
+  // gets picked up automatically.
   const cameraDevice = useMemo(() => {
-    const real = devices.filter(
+    console.log(
+      `[LightDemo] cameras (${devices.length}): ` +
+        devices
+          .map((d) => `"${d.localizedName}" [${d.type}/${d.position}]`)
+          .join(', '),
+    )
+    const device = devices.find(
       (d) =>
+        d.type === 'external' &&
         !d.isContinuityCamera &&
-        d.type !== 'continuity' &&
         !d.localizedName.includes('NULL'),
     )
-    const device =
-      real.find((d) => d.type === 'external') ??
-      real.find((d) => d.position === 'front') ??
-      real.find((d) => d.position === 'back') ??
-      real[0]
-    if (device != null) {
-      console.log(
-        `[LightDemo] camera: "${device.localizedName}" type=${device.type} ` +
-          `position=${device.position} (${devices.length} devices total)`,
-      )
-    }
+    console.log(
+      device != null
+        ? `[LightDemo] camera: "${device.localizedName}"`
+        : '[LightDemo] camera: none - waiting for a USB camera to register',
+    )
     return device
   }, [devices])
 
@@ -458,26 +460,6 @@ function LightView() {
   // buffer.readSync - no async readback machinery remains).
   useEffect(() => {
     if (depthart == null) return
-    // Debug: dump the model INPUT tensor (what DepthART actually sees).
-    ;(globalThis as Record<string, unknown>).__dumpInput = async (outPath: string) => {
-      const W = depthart.depthW
-      const H = depthart.depthH
-      const input = await (
-        depthart.preprocess.output as unknown as {
-          read(): Promise<{ x: number; y: number; z: number }[]>
-        }
-      ).read()
-      const rgba = new Uint8Array(W * H * 4)
-      for (let i = 0; i < W * H; i++) {
-        const v = input[i]!
-        rgba[i * 4] = Math.max(0, Math.min(255, (v.x * 0.229 + 0.485) * 255))
-        rgba[i * 4 + 1] = Math.max(0, Math.min(255, (v.y * 0.224 + 0.456) * 255))
-        rgba[i * 4 + 2] = Math.max(0, Math.min(255, (v.z * 0.225 + 0.406) * 255))
-        rgba[i * 4 + 3] = 255
-      }
-      await LightNativeModule.savePng(outPath, W, H, W * 4, false, rgba.buffer as ArrayBuffer)
-      return 'saved'
-    }
     return undefined
   }, [depthart])
 
@@ -558,11 +540,12 @@ function LightView() {
           const tSync = performance.now() - tSync0
           const tEnc0 = performance.now()
 
-          // --- DepthART inference: a typed TypeGPU encoder wraps the whole
-          // frame; the raw lighting passes below record into the SAME
-          // encoder via root.unwrap, one submission for everything. ---
-          const tgpuEncoder = depthart.root['~unstable'].createCommandEncoder()
-          const infPass = tgpuEncoder.beginComputePass()
+          // --- DepthART inference: everything raw WebGPU - the typed
+          // TypeGPU dispatch recording measured ~6.5ms/frame in Hermes for
+          // ~270 dispatches; raw handles pre-unwrapped at init are a
+          // fraction of that. ---
+          const infEncoder = device.createCommandEncoder()
+          const infPass = infEncoder.beginComputePass()
 
           // 1. camera -> normalized [1,3,448,448] input tensor. The external
           // texture import already BAKES the display rotation into uv space
@@ -577,44 +560,38 @@ function LightView() {
             swapAxes: rotated ? 1 : 0,
             total: depthart.preprocess.total,
           })
-          const preBindGroup = depthart.root.createBindGroup(depthart.preprocess.layout, {
-            params: depthart.preprocess.params,
-            frame: externalTexture,
-            sampler: depthart.preprocess.sampler,
-            output: depthart.preprocess.output,
+          const preBindGroup = device.createBindGroup({
+            layout: depthart.preprocess.layoutRaw,
+            entries: [
+              { binding: 0, resource: { buffer: depthart.preprocess.paramsRaw } },
+              { binding: 1, resource: externalTexture },
+              { binding: 2, resource: depthart.preprocess.samplerRaw },
+              { binding: 3, resource: { buffer: depthart.preprocess.outputRaw } },
+            ],
           })
-          depthart.preprocess.pipeline
-            .with(infPass)
-            .with(preBindGroup)
-            .dispatchWorkgroups(Math.ceil(depthart.preprocess.total / 64))
+          infPass.setPipeline(depthart.preprocess.pipelineRaw)
+          infPass.setBindGroup(0, preBindGroup)
+          infPass.dispatchWorkgroups(Math.ceil(depthart.preprocess.total / 64))
 
-          // 2. the model: ~230 prepared dispatches, all inside this pass.
+          // 2. the model: ~260 prepared dispatches, all inside this pass.
           for (const item of depthart.dispatches) {
-            item.pipeline
-              .with(infPass)
-              .with(item.bindGroup)
-              .dispatchWorkgroups(
-                item.workgroups.x,
-                item.workgroups.y ?? 1,
-                item.workgroups.z ?? 1,
-              )
+            infPass.setPipeline(item.pipeline)
+            infPass.setBindGroup(0, item.bindGroup)
+            infPass.dispatchWorkgroups(item.x, item.y, item.z)
           }
 
           // 3. GPU 2-98% disparity range (histogram; writes the vec2f the
           // JBU normalization reads - no CPU round-trip).
-          for (let i = 0; i < depthart.range.pipelines.length; i++) {
-            depthart.range.pipelines[i]
-              .with(infPass)
-              .with(depthart.range.bindGroup)
-              .dispatchWorkgroups(depthart.range.workgroups[i])
+          for (const item of depthart.range) {
+            infPass.setPipeline(item.pipeline)
+            infPass.setBindGroup(0, item.bindGroup)
+            infPass.dispatchWorkgroups(item.x, item.y, item.z)
           }
 
           infPass.end()
-          // SUBMIT #1: the ~260 inference dispatches start on the GPU NOW,
-          // overlapping both the Vision wait and the probe encode below.
-          device.queue.submit([
-            (depthart.root.unwrap(tgpuEncoder) as GPUCommandEncoder).finish(),
-          ])
+          // SUBMIT #1: inference starts on the GPU NOW, overlapping both
+          // the Vision wait and the probe encode below.
+          device.queue.submit([infEncoder.finish()])
 
           // Join Vision: it ran on the ANE while we encoded (and the GPU is
           // now crunching inference in parallel) - landmarks are SAME-FRAME.
@@ -680,18 +657,16 @@ function LightView() {
             // type only advertises typed vectors.
             points: probePoints as unknown as d.v4f[],
           })
-          const probeEncoder = depthart.root['~unstable'].createCommandEncoder()
+          const probeEncoder = device.createCommandEncoder()
           const probePass = probeEncoder.beginComputePass()
-          depthart.probe.pipeline
-            .with(probePass)
-            .with(depthart.probe.bindGroup)
-            .dispatchWorkgroups(1)
+          probePass.setPipeline(depthart.probe.pipelineRaw)
+          probePass.setBindGroup(0, depthart.probe.bindGroupRaw)
+          probePass.dispatchWorkgroups(1)
           probePass.end()
-          const rawProbeEncoder = depthart.root.unwrap(probeEncoder) as GPUCommandEncoder
-          rawProbeEncoder.copyBufferToBuffer(
+          probeEncoder.copyBufferToBuffer(
             depthart.probeResultRaw, 0, depthart.probeStaging, 0, 16,
           )
-          device.queue.submit([rawProbeEncoder.finish()])
+          device.queue.submit([probeEncoder.finish()])
           // Same-frame readback: blocks until submit #1 + the probe drain.
           const gdBytes = (
             depthart.probeStaging as unknown as { readSync(): ArrayBuffer }
@@ -1211,6 +1186,8 @@ function LightView() {
             <Text style={styles.loadingText}>
               {nitro == null
                 ? 'Loading depth model…'
+                : cameraDevice == null
+                  ? 'Waiting for USB camera…'
                 : pipeline == null
                   ? 'Preparing GPU pipelines…'
                   : 'Starting camera…'}
