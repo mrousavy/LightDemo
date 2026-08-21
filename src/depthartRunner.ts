@@ -35,7 +35,9 @@ export const ProbeParams = d.struct({
   outputSize: d.vec2u,
   count1: d.u32,
   count2: d.u32,
-  points: d.arrayOf(d.vec2f, 48),
+  // 48 probe points packed two-per-vec4 (xy, zw): a vec2f array in a
+  // uniform has stride 8, which is not a portable uniform layout.
+  points: d.arrayOf(d.vec4f, 24),
 })
 
 export const probeLayout = tgpu.bindGroupLayout({
@@ -50,7 +52,9 @@ const handMaxDisparity = (first: number, count: number) => {
   const params = probeLayout.$.params
   let best = d.f32(-1)
   for (let i = d.i32(0); i < count; i++) {
-    const point = params.points[first + i]
+    const index = d.u32(first + i)
+    const pair = params.points[index >> 1]
+    const point = (index & 1) === 0 ? pair.xy : pair.zw
     const x = std.clamp(
       d.u32(point.x * d.f32(params.outputSize.x)),
       d.u32(0),
@@ -117,6 +121,9 @@ export interface DepthartRunner {
   // Raw GPUBuffers for the raw-WebGPU lighting passes.
   disparityRawBuffer: GPUBuffer
   rangeRawBuffer: GPUBuffer
+  probeResultRaw: GPUBuffer
+  // MAP_READ staging for the same-frame readSync of the probe result.
+  probeStaging: GPUBuffer
 }
 
 export async function createDepthartRunner(device: GPUDevice): Promise<DepthartRunner> {
@@ -192,5 +199,11 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
     },
     disparityRawBuffer: arena.outputBuffer.buffer,
     rangeRawBuffer: rangeBuffer.buffer,
+    probeResultRaw: probeResult.buffer,
+    probeStaging: device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+      label: 'probe-staging',
+    }),
   }
 }

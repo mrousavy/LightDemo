@@ -29,7 +29,6 @@ import {
   type LightStatus,
 } from 'light-native'
 import { d } from 'typegpu'
-import { createSynchronizable } from 'react-native-worklets'
 import { createDepthartRunner, type DepthartRunner } from './depthartRunner'
 import { DEPTH_PREPARE_SHADER, RELIGHT_SHADER, SURFACE_SHADER } from './shaders'
 
@@ -448,38 +447,17 @@ function LightView() {
       tEnc: 0,
       tSub: 0,
       tWait: 0,
-      // Reused every frame (48 [x, y] slots) - per-frame allocation here
-      // showed up as rare GC stutters.
-      probePoints: Array.from({ length: 48 }, () => [0, 0]) as number[][],
+      // Reused every frame: 24 vec4 rows = 48 packed [x, y] probe points
+      // (per-frame allocation here showed up as rare GC stutters).
+      probePoints: Array.from({ length: 24 }, () => [0, 0, 0, 0]) as number[][],
     }),
     [],
   )
 
-  // GPU hand-depth probe results, read back asynchronously on the main JS
-  // thread and shared into the frame worklet (1-frame staleness is
-  // invisible after the z EMA).
-  const gpuDepth = useMemo(
-    () => createSynchronizable({ h1: -1, h2: -1, low: 0, high: 1 }),
-    [],
-  )
+  // Debug hooks (the probe is consumed same-frame in the worklet via
+  // buffer.readSync - no async readback machinery remains).
   useEffect(() => {
     if (depthart == null) return
-    let live = true
-    let busy = false
-    const interval = setInterval(() => {
-      if (busy) return
-      busy = true
-      ;(depthart.probe.result as { read(): Promise<{ x: number; y: number; z: number; w: number }> })
-        .read()
-        .then((v) => {
-          if (live) gpuDepth.setBlocking({ h1: v.x, h2: v.y, low: v.z, high: v.w })
-          ;(globalThis as Record<string, unknown>).__gpuDepth = { h1: v.x, h2: v.y, low: v.z, high: v.w }
-        })
-        .catch(() => {})
-        .finally(() => {
-          busy = false
-        })
-    }, 33)
     // Debug: dump the model INPUT tensor (what DepthART actually sees).
     ;(globalThis as Record<string, unknown>).__dumpInput = async (outPath: string) => {
       const W = depthart.depthW
@@ -500,11 +478,8 @@ function LightView() {
       await LightNativeModule.savePng(outPath, W, H, W * 4, false, rgba.buffer as ArrayBuffer)
       return 'saved'
     }
-    return () => {
-      live = false
-      clearInterval(interval)
-    }
-  }, [depthart, gpuDepth])
+    return undefined
+  }, [depthart])
 
   // Stable worklet: identity must only change when the captured pipeline
   // objects change, otherwise every React render re-serializes the closure
@@ -634,17 +609,25 @@ function LightView() {
               .dispatchWorkgroups(depthart.range.workgroups[i])
           }
 
-          // Join Vision: it ran on the ANE while we encoded ~260 dispatches,
-          // so this wait is (17ms - encode time), not 17ms - and the
-          // landmarks are SAME-FRAME.
+          infPass.end()
+          // SUBMIT #1: the ~260 inference dispatches start on the GPU NOW,
+          // overlapping both the Vision wait and the probe encode below.
+          device.queue.submit([
+            (depthart.root.unwrap(tgpuEncoder) as GPUCommandEncoder).finish(),
+          ])
+
+          // Join Vision: it ran on the ANE while we encoded (and the GPU is
+          // now crunching inference in parallel) - landmarks are SAME-FRAME.
           const tWait0 = performance.now()
           nitro.waitForHands()
           box.tWait = box.tWait * 0.9 + (performance.now() - tWait0) * 0.1
           const hand = nitro.getHandResult()
 
           // 4. hand-depth probe: 5-tap crosses at thumb/index/pinch of each
-          // hand, max disparity normalized on GPU; read back async on the
-          // main thread for the JS z state machine.
+          // hand, max disparity normalized on GPU - then read back
+          // SYNCHRONOUSLY (buffer.readSync, our rnwgpu extension) so the z
+          // state machine consumes THIS frame's depth. 16 bytes, ~[gpu
+          // drain]+0.1ms.
           const probePoints = box.probePoints
           const PROBE_OFF = 2 / depthart.depthW
           const PROBE_TAPS = [
@@ -663,9 +646,10 @@ function LightView() {
             ]
             for (const a of anchors) {
               for (const t of PROBE_TAPS) {
-                const slot = probePoints[count1]!
-                slot[0] = a[0]! + t[0]!
-                slot[1] = a[1]! + t[1]!
+                const row = probePoints[count1 >> 1]!
+                const lane = (count1 & 1) * 2
+                row[lane] = a[0]! + t[0]!
+                row[lane + 1] = a[1]! + t[1]!
                 count1++
               }
             }
@@ -679,9 +663,11 @@ function LightView() {
             ]
             for (const a of anchors) {
               for (const t of PROBE_TAPS) {
-                const slot = probePoints[24 + count2]!
-                slot[0] = a[0]! + t[0]!
-                slot[1] = a[1]! + t[1]!
+                const index = 24 + count2
+                const row = probePoints[index >> 1]!
+                const lane = (index & 1) * 2
+                row[lane] = a[0]! + t[0]!
+                row[lane + 1] = a[1]! + t[1]!
                 count2++
               }
             }
@@ -690,19 +676,32 @@ function LightView() {
             outputSize: d.vec2u(depthart.depthW, depthart.depthH),
             count1,
             count2,
-            // Plain [x, y] tuples are a documented fast-path write form;
-            // the TS type only advertises typed vectors.
-            points: probePoints as unknown as d.v2f[],
+            // Plain tuples are a documented fast-path write form; the TS
+            // type only advertises typed vectors.
+            points: probePoints as unknown as d.v4f[],
           })
+          const probeEncoder = depthart.root['~unstable'].createCommandEncoder()
+          const probePass = probeEncoder.beginComputePass()
           depthart.probe.pipeline
-            .with(infPass)
+            .with(probePass)
             .with(depthart.probe.bindGroup)
             .dispatchWorkgroups(1)
-          infPass.end()
+          probePass.end()
+          const rawProbeEncoder = depthart.root.unwrap(probeEncoder) as GPUCommandEncoder
+          rawProbeEncoder.copyBufferToBuffer(
+            depthart.probeResultRaw, 0, depthart.probeStaging, 0, 16,
+          )
+          device.queue.submit([rawProbeEncoder.finish()])
+          // Same-frame readback: blocks until submit #1 + the probe drain.
+          const gdBytes = (
+            depthart.probeStaging as unknown as { readSync(): ArrayBuffer }
+          ).readSync()
+          const gdF32 = new Float32Array(gdBytes)
+          const gd = { h1: gdF32[0]!, h2: gdF32[1]!, low: gdF32[2]!, high: gdF32[3]! }
           const tEnc = performance.now() - tEnc0
 
-          // Everything below records RAW WebGPU into the same encoder.
-          const encoder = depthart.root.unwrap(tgpuEncoder) as GPUCommandEncoder
+          // The lighting passes get their own raw encoder (third submission).
+          const encoder = device.createCommandEncoder()
 
           // --- JBU + lighting field, every frame ---
           const reset = box.depthEverRun ? 0 : 1
@@ -816,9 +815,7 @@ function LightView() {
                     box.lightX += (cx - box.lightX) * 0.06
                     box.lightY += (cy - box.lightY) * 0.06
                     freshHandUpdate = true
-                    // GPU probe result: already range-normalized (1-frame
-                    // stale via the async readback; invisible after EMA).
-                    const gd = gpuDepth.getDirty()
+                    // GPU probe result: range-normalized, SAME frame.
                     let hoverNorm = -1
                     for (const item of detail) {
                       const norm = item.h === hand.hand1 ? gd.h1 : gd.h2
@@ -897,7 +894,6 @@ function LightView() {
                   if (locked.h.handSize > 0) {
                     box.grabbedHandSize = locked.h.handSize
                   }
-                  const gd = gpuDepth.getDirty()
                   const nearestNorm = locked.h === hand.hand1 ? gd.h1 : gd.h2
                   if (nearestNorm >= 0) {
                     const targetZ = (nearestNorm - 1) * Z_FAR + Z_MARGIN
@@ -1114,7 +1110,7 @@ function LightView() {
         frame.dispose()
       }
     },
-    [pipeline, device, nitro, depthart, gpuDepth, box, rnwgpu],
+    [pipeline, device, nitro, depthart, box, rnwgpu],
   )
 
   // Synchronous depth makes the frame callback take ~1 model interval, so
