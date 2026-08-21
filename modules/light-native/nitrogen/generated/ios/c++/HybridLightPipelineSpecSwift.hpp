@@ -98,6 +98,12 @@ namespace margelo::nitro::lightnative {
       auto __value = std::move(__result.value());
       return __value;
     }
+    inline void waitForHands() override {
+      auto __result = _swiftPart.waitForHands();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
+    }
     inline DepthResult getDepthResult() override {
       auto __result = _swiftPart.getDepthResult();
       if (__result.hasError()) [[unlikely]] {

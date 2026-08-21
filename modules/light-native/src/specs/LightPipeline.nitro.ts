@@ -49,6 +49,13 @@ export interface LightPipeline
     runDepth: boolean
   ): DepthResult
 
+  /**
+   * Blocks until the hand detection started by the current analyzeSync
+   * call completes - lets the caller overlap GPU encoding with Vision and
+   * still consume SAME-FRAME landmarks.
+   */
+  waitForHands(): void
+
   /** Latest completed depth inference (seq -1 if none yet). */
   getDepthResult(): DepthResult
   /** Latest completed hand detection (seq -1 if none yet). */

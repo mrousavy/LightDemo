@@ -44,26 +44,15 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private let handRequest: VNDetectHumanHandPoseRequest = {
     let request = VNDetectHumanHandPoseRequest()
     request.maximumHandCount = 2
-    // Pin Vision's hand-pose networks OFF the Neural Engine: they otherwise
-    // schedule onto it and CONTEND with our depth prediction running
-    // concurrently (hands wall time ballooned 17.6ms -> 33ms overlapped).
-    if #available(iOS 17.0, *) {
-      let cpu = MLComputeDevice.allComputeDevices.first(where: {
-        if case .cpu = $0 { return true }
-        return false
-      })
-      if let cpu {
-        request.setComputeDevice(cpu, for: .main)
-        request.setComputeDevice(cpu, for: .postProcessing)
-      }
-    }
+    // Vision runs on the Neural Engine (17.6ms) - the ANE is idle now that
+    // depth lives on the GPU, so there is nothing to contend with.
     return request
   }()
   private let sequenceHandler = VNSequenceRequestHandler()
   /// Runs Vision hand detection concurrently with the ANE depth prediction
   /// inside analyzeSync (joined before it returns).
   private let handQueue = DispatchQueue(label: "com.mrousavy.lightdemo.hands", qos: .userInteractive)
-  private var handBusy = false
+  private var handGroup: DispatchGroup?
 
   // One persistent IOSurface-backed output buffer, handed to CoreML via
   // MLPredictionOptions.outputBackings - the model writes depth into the
@@ -185,22 +174,19 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
         group.wait()
         attachHandDepth()
       } else {
-        // GPU-depth mode: fire Vision WITHOUT waiting - the caller consumes
-        // last frame's landmarks via getHandResult (one frame of landmark
-        // staleness is invisible; blocking cost ~20ms of every frame).
-        // Ping-pong input buffers prevent the next frame's prep render from
-        // tearing the buffer Vision is still reading.
+        // GPU-depth mode: fire Vision now; the caller encodes GPU work
+        // while it runs and joins via waitForHands() - SAME-FRAME
+        // landmarks with the detection cost overlapped, not serialized.
+        // Ping-pong input buffers prevent the next frame's prep render
+        // from tearing the buffer Vision is reading.
+        let group = DispatchGroup()
+        group.enter()
         lock.lock()
-        let busy = handBusy
-        if !busy { handBusy = true }
+        handGroup = group
         lock.unlock()
-        if !busy {
-          handQueue.async { [self] in
-            detectHands(onPreparedInput: input)
-            lock.lock()
-            handBusy = false
-            lock.unlock()
-          }
+        handQueue.async { [self] in
+          detectHands(onPreparedInput: input)
+          group.leave()
         }
       }
     } else if runDepth {
@@ -536,6 +522,14 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     // landmark still reads near, that is the hand's true plane. Spurious
     // too-near outliers are rare (model errors bleed toward background).
     return Double(values.max()!)
+  }
+
+  func waitForHands() throws {
+    lock.lock()
+    let group = handGroup
+    handGroup = nil
+    lock.unlock()
+    group?.wait()
   }
 
   func getHandResult() throws -> HandResult {

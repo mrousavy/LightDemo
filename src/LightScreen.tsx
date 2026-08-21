@@ -447,6 +447,10 @@ function LightView() {
       tSync: 0,
       tEnc: 0,
       tSub: 0,
+      tWait: 0,
+      // Reused every frame (48 [x, y] slots) - per-frame allocation here
+      // showed up as rare GC stutters.
+      probePoints: Array.from({ length: 48 }, () => [0, 0]) as number[][],
     }),
     [],
   )
@@ -576,7 +580,6 @@ function LightView() {
           // longer runs natively. ---
           const tSync0 = performance.now()
           const depth = nitro.analyzeSync(frame, rotationDeg, controlsNow.handControl, false)
-          const hand = nitro.getHandResult()
           const tSync = performance.now() - tSync0
           const tEnc0 = performance.now()
 
@@ -631,11 +634,18 @@ function LightView() {
               .dispatchWorkgroups(depthart.range.workgroups[i])
           }
 
+          // Join Vision: it ran on the ANE while we encoded ~260 dispatches,
+          // so this wait is (17ms - encode time), not 17ms - and the
+          // landmarks are SAME-FRAME.
+          const tWait0 = performance.now()
+          nitro.waitForHands()
+          box.tWait = box.tWait * 0.9 + (performance.now() - tWait0) * 0.1
+          const hand = nitro.getHandResult()
+
           // 4. hand-depth probe: 5-tap crosses at thumb/index/pinch of each
           // hand, max disparity normalized on GPU; read back async on the
-          // main thread (1-frame stale, invisible after the z EMA).
-          const probePoints: number[][] = []
-          for (let i = 0; i < 48; i++) probePoints.push([0, 0])
+          // main thread for the JS z state machine.
+          const probePoints = box.probePoints
           const PROBE_OFF = 2 / depthart.depthW
           const PROBE_TAPS = [
             [0, 0],
@@ -653,7 +663,9 @@ function LightView() {
             ]
             for (const a of anchors) {
               for (const t of PROBE_TAPS) {
-                probePoints[count1] = [a[0]! + t[0]!, a[1]! + t[1]!]
+                const slot = probePoints[count1]!
+                slot[0] = a[0]! + t[0]!
+                slot[1] = a[1]! + t[1]!
                 count1++
               }
             }
@@ -667,7 +679,9 @@ function LightView() {
             ]
             for (const a of anchors) {
               for (const t of PROBE_TAPS) {
-                probePoints[24 + count2] = [a[0]! + t[0]!, a[1]! + t[1]!]
+                const slot = probePoints[24 + count2]!
+                slot[0] = a[0]! + t[0]!
+                slot[1] = a[1]! + t[1]!
                 count2++
               }
             }
@@ -1054,7 +1068,7 @@ function LightView() {
             console.log(
               `[LightDemo] #${box.frameCount} ${box.fps.toFixed(0)}fps ` +
                 `render=${(now - renderStart).toFixed(1)}ms ` +
-                `sync=${box.tSync.toFixed(1)} enc=${box.tEnc.toFixed(1)} sub=${box.tSub.toFixed(1)} ` +
+                `sync=${box.tSync.toFixed(1)} enc=${box.tEnc.toFixed(1)} wait=${box.tWait.toFixed(1)} sub=${box.tSub.toFixed(1)} ` +
                 `depth#${depth.seq}=${depth.inferenceTimeMs.toFixed(0)}ms ` +
                 `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
                 `hands=${(hand.hand1.tracked ? 1 : 0) + (hand.hand2.tracked ? 1 : 0)} ` +
@@ -1183,7 +1197,18 @@ function LightView() {
         onTouchEnd={() => {
           setControls((c) => ({ ...c, touchActive: false }))
         }}>
-        <Canvas ref={ref} style={styles.canvas} />
+        <Canvas
+          ref={ref}
+          style={[
+            styles.canvas,
+            // Largest 4:3 rect that fits the window (minus HUD strip):
+            // RN's aspectRatio+maxHeight combo clamps height AFTER
+            // computing it, silently stretching the canvas.
+            window.width / (window.height - 120) > 4 / 3
+              ? { height: window.height - 120, width: ((window.height - 120) * 4) / 3 }
+              : { width: window.width, height: (window.width * 3) / 4 },
+          ]}
+        />
         {(nitro == null || pipeline == null || (status?.frameCount ?? 0) === 0) && (
           <View style={styles.loadingOverlay} pointerEvents="none">
             <ActivityIndicator size="large" color="#ffffff" />
@@ -1272,7 +1297,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  canvas: { alignSelf: 'center', width: '100%', maxHeight: '100%', aspectRatio: 4 / 3 },
+  canvas: { alignSelf: 'center' },
   center: {
     flex: 1,
     backgroundColor: 'black',

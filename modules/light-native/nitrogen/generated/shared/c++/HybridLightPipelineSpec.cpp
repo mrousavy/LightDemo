@@ -17,6 +17,7 @@ namespace margelo::nitro::lightnative {
       prototype.registerHybridGetter("depthWidth", &HybridLightPipelineSpec::getDepthWidth);
       prototype.registerHybridGetter("depthHeight", &HybridLightPipelineSpec::getDepthHeight);
       prototype.registerHybridMethod("analyzeSync", &HybridLightPipelineSpec::analyzeSync);
+      prototype.registerHybridMethod("waitForHands", &HybridLightPipelineSpec::waitForHands);
       prototype.registerHybridMethod("getDepthResult", &HybridLightPipelineSpec::getDepthResult);
       prototype.registerHybridMethod("getHandResult", &HybridLightPipelineSpec::getHandResult);
       prototype.registerHybridMethod("sampleDepthMax", &HybridLightPipelineSpec::sampleDepthMax);
