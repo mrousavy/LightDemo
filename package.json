@@ -10,6 +10,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@petamoriken/float16": "^3.9.3",
     "@react-native/new-app-screen": "0.87.0",
     "light-native": "link:light-native",
     "react": "19.2.3",
@@ -20,7 +21,9 @@
     "react-native-vision-camera": "5.2.2",
     "react-native-vision-camera-worklets": "5.2.2",
     "react-native-webgpu": "0.8.2",
-    "react-native-worklets": "0.12.1"
+    "react-native-worklets": "0.12.1",
+    "typegpu": "0.12.1",
+    "unplugin-typegpu": "0.12.2"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
