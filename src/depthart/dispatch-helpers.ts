@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d } from 'typegpu';
 import type { TgpuComputePipeline, TgpuRoot, TgpuUniform, ValidateUniformSchema } from 'typegpu';
 import type { OwnedGpuResource, PreparedDispatch } from './execution-plan.ts';

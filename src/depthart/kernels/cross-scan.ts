@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import { maskPaddedChannels } from './helpers.ts';
 import { crossMergeLayout } from './layouts.ts';

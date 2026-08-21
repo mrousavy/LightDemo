@@ -145,7 +145,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   }
 
   func analyzeSync(
-    frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool
+    frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool, runDepth: Bool
   ) throws -> DepthResult {
     // Typed Frame handoff: cast the spec to VisionCamera's public
     // NativeFrame protocol for native buffer access.
@@ -177,10 +177,10 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
         detectHands(onPreparedInput: input)
         group.leave()
       }
-      predictDepth(on: input, start: start, prepDone: prepDone)
+      if runDepth { predictDepth(on: input, start: start, prepDone: prepDone) }
       group.wait()
-      attachHandDepth()
-    } else {
+      if runDepth { attachHandDepth() }
+    } else if runDepth {
       predictDepth(on: input, start: start, prepDone: prepDone)
     }
 

@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, tgpu } from 'typegpu';
 
 export const ElementwiseUniforms = d.struct({

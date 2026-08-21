@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import type { TgpuRoot } from 'typegpu';
 import { buildConvDispatch } from './conv-dispatches.ts';
 import {

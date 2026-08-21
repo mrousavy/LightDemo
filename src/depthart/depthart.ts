@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import type { TgpuComputePass, TgpuComputePipeline, TgpuRoot } from 'typegpu';
 import { outerProductPointwiseWeights } from './conv-dispatches.ts';
 import { createDepthDispatches } from './dispatches.ts';

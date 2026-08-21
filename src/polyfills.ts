@@ -1,9 +1,11 @@
 // Hermes lacks TextDecoder and the Float16 DataView methods; both are needed
 // by the DepthART bundle loader (manifest JSON decode + fp16 weight upload).
 // Load-time only - nothing on the per-frame path touches these.
-import { DataView as DataViewF16, Float16Array as F16Array } from '@petamoriken/float16'
+import { Float16Array as F16Array, getFloat16, setFloat16 } from '@petamoriken/float16'
 
-if (typeof globalThis.TextDecoder === 'undefined') {
+const g = globalThis as unknown as Record<string, unknown>
+
+if (typeof g.TextDecoder === 'undefined') {
   class TextDecoderPolyfill {
     decode(input?: ArrayBuffer | ArrayBufferView): string {
       if (input == null) return ''
@@ -13,7 +15,7 @@ if (typeof globalThis.TextDecoder === 'undefined') {
           : ArrayBuffer.isView(input)
             ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength)
             : new Uint8Array(input)
-      // UTF-8 decode (the manifest is JSON; surrogate handling included).
+      // UTF-8 decode (the manifest is JSON).
       let out = ''
       let i = 0
       while (i < bytes.length) {
@@ -41,36 +43,23 @@ if (typeof globalThis.TextDecoder === 'undefined') {
       return out
     }
   }
-  ;(globalThis as Record<string, unknown>).TextDecoder = TextDecoderPolyfill
+  g.TextDecoder = TextDecoderPolyfill
 }
 
-// getFloat16/setFloat16 on DataView + global Float16Array.
-if (typeof (DataView.prototype as Record<string, unknown>).getFloat16 === 'undefined') {
-  ;(DataView.prototype as Record<string, unknown>).getFloat16 = function (
-    this: DataView,
-    offset: number,
-    littleEndian?: boolean,
-  ) {
-    return (DataViewF16 as unknown as { getFloat16: (dv: DataView, o: number, le?: boolean) => number }).getFloat16(
-      this,
-      offset,
-      littleEndian,
-    )
+const dvProto = DataView.prototype as unknown as Record<string, unknown>
+if (typeof dvProto.getFloat16 === 'undefined') {
+  dvProto.getFloat16 = function (this: DataView, offset: number, littleEndian?: boolean) {
+    return getFloat16(this, offset, littleEndian)
   }
-  ;(DataView.prototype as Record<string, unknown>).setFloat16 = function (
+  dvProto.setFloat16 = function (
     this: DataView,
     offset: number,
     value: number,
     littleEndian?: boolean,
   ) {
-    ;(DataViewF16 as unknown as { setFloat16: (dv: DataView, o: number, v: number, le?: boolean) => void }).setFloat16(
-      this,
-      offset,
-      value,
-      littleEndian,
-    )
+    setFloat16(this, offset, value, littleEndian)
   }
 }
-if (typeof (globalThis as Record<string, unknown>).Float16Array === 'undefined') {
-  ;(globalThis as Record<string, unknown>).Float16Array = F16Array
+if (typeof g.Float16Array === 'undefined') {
+  g.Float16Array = F16Array
 }

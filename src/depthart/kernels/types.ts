@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 export const DEPTH_KERNEL_WORKGROUP_SIZE = 64;
 
 /** Launch width for the element-per-invocation convolutions */

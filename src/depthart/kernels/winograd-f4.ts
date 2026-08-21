@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import { activationSlot, maskPaddedChannels } from './helpers.ts';
 import { winogradInputLayout, winogradOutputLayout } from './layouts.ts';

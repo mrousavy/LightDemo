@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import type { TgpuComputePipeline } from 'typegpu';
 import {
   ACTIVATION_FUNCTIONS,

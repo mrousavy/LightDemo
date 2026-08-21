@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import type { TgpuBindGroup, TgpuComputePass, TgpuComputePipeline } from 'typegpu';
 
 interface Workgroups {

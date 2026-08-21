@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import { winogradGemmLayout } from './layouts.ts';
 import {

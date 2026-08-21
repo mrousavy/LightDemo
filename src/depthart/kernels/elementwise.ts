@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import { binaryLayout, channelAffineLayout, unaryLayout } from './layouts.ts';
 import { maskPaddedChannels } from './helpers.ts';

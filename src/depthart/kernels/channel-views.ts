@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import { channelConcatLayout, channelSplitLayout } from './layouts.ts';
 import { DEPTH_KERNEL_WORKGROUP_SIZE } from './types.ts';

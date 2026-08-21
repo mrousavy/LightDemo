@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std } from 'typegpu';
 import { createDepthwiseKernels, fmaAccumulate } from './depthwise.ts';
 import { packedF16DepthwiseConvLayout } from './layouts.ts';

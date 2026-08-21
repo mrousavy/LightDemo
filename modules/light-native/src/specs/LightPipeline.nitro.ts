@@ -45,7 +45,8 @@ export interface LightPipeline
   analyzeSync(
     frame: Frame,
     orientationDegrees: number,
-    runHands: boolean
+    runHands: boolean,
+    runDepth: boolean
   ): DepthResult
 
   /** Latest completed depth inference (seq -1 if none yet). */

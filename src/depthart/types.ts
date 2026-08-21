@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 type DepthModel = 'depthart-relative-s-448' | 'depthart-relative-b-448' | 'depthart-relative-l-448';
 
 type DepthInputKind = 'normalized-rgb-tensor' | 'srgb-image';

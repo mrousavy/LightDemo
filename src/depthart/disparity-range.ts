@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import type {
   StorageFlag,
@@ -240,6 +241,21 @@ export class DepthDisparityRangeEstimator {
 
   detach(): void {
     this.#bindGroup = undefined;
+  }
+
+  /** LIGHTDEMO PATCH: flat, worklet-transferable encoding parts (class
+   * instances do not survive the worklet boundary; these handles do). */
+  get parts() {
+    return {
+      pipelines: [
+        this.#resetPipeline,
+        this.#reducePipeline,
+        this.#histogramPipeline,
+        this.#finalizePipeline,
+      ],
+      bindGroup: this.#bindGroup,
+      workgroups: [1, this.#workgroups, this.#workgroups, 1],
+    };
   }
 
   encode(pass: TgpuComputePass): void {

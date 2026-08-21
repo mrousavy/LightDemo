@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d } from 'typegpu';
 import type { StorageFlag, TgpuBuffer, TgpuRoot } from 'typegpu';
 import {

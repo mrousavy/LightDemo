@@ -138,13 +138,13 @@ open class HybridLightPipelineSpec_cxx {
 
   // Methods
   @inline(__always)
-  public final func analyzeSync(frame: bridge.std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_, orientationDegrees: Double, runHands: Bool) -> bridge.Result_DepthResult_ {
+  public final func analyzeSync(frame: bridge.std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_, orientationDegrees: Double, runHands: Bool, runDepth: Bool) -> bridge.Result_DepthResult_ {
     do {
       let __result = try self.__implementation.analyzeSync(frame: { () -> any HybridFrameSpec in
         let __unsafePointer = bridge.get_std__shared_ptr_margelo__nitro__camera__HybridFrameSpec_(frame)
         let __instance = HybridFrameSpec_cxx.fromUnsafe(__unsafePointer)
         return __instance.getHybridFrameSpec()
-      }(), orientationDegrees: orientationDegrees, runHands: runHands)
+      }(), orientationDegrees: orientationDegrees, runHands: runHands, runDepth: runDepth)
       let __resultCpp = __result
       return bridge.create_Result_DepthResult_(__resultCpp)
     } catch (let __error) {

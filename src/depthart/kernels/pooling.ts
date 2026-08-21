@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, tgpu } from 'typegpu';
 import { blockedElement, hwc4Index, maskPaddedChannels } from './helpers.ts';
 import { poolLayout } from './layouts.ts';

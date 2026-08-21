@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import type { DepthBundle, DepthOutputPolarity, DepthWeightSection } from './types.ts';
 
 const BUNDLE_MAGIC = 'DARTBND\0';

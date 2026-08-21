@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { DepthDType } from './types.ts';
 import type { DepthBundle, DepthTensor, DepthWeightSection } from './types.ts';
 

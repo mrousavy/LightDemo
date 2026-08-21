@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import { crossScanSourcePixel, directionalScalarIndex } from './cross-scan.ts';
 import { componentAt, softplus } from './helpers.ts';

@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import type { DepthBundle, DepthTensor } from './types.ts';
 import { tensorSectionBytes } from './winograd-weight.ts';
 

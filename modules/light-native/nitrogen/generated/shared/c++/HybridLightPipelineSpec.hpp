@@ -64,7 +64,7 @@ namespace margelo::nitro::lightnative {
 
     public:
       // Methods
-      virtual DepthResult analyzeSync(const std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>& frame, double orientationDegrees, bool runHands) = 0;
+      virtual DepthResult analyzeSync(const std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>& frame, double orientationDegrees, bool runHands, bool runDepth) = 0;
       virtual DepthResult getDepthResult() = 0;
       virtual HandResult getHandResult() = 0;
       virtual double sampleDepthMax(const std::vector<double>& points) = 0;

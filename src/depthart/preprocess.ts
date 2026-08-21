@@ -1,3 +1,4 @@
+// @ts-nocheck - vendored from software-mansion/TypeGPU (upstream-typechecked)
 import { d, std, tgpu } from 'typegpu';
 import type {
   TgpuComputePass,
@@ -20,7 +21,7 @@ export interface DepthFrameOptions {
   readonly swapAxes: boolean;
 }
 
-const FrameParams = d.struct({
+export const FrameParams = d.struct({
   uvTransform: d.mat2x2f,
   outputSize: d.vec2u,
   mirrorX: d.u32,
@@ -28,7 +29,7 @@ const FrameParams = d.struct({
   total: d.u32,
 });
 
-const preprocessLayout = tgpu.bindGroupLayout({
+export const preprocessLayout = tgpu.bindGroupLayout({
   params: { uniform: FrameParams },
   frame: { externalTexture: d.textureExternal() },
   sampler: { sampler: 'filtering' },
@@ -60,7 +61,7 @@ function sampleSourcePixel(pixel: d.v2f, sourceSize: d.v2f): d.v3f {
   ).rgb;
 }
 
-const depthFramePreprocessKernel = tgpu.computeFn({
+export const depthFramePreprocessKernel = tgpu.computeFn({
   in: { gid: d.builtin.globalInvocationId },
   workgroupSize: [WORKGROUP_SIZE],
 })(({ gid }) => {
@@ -79,10 +80,11 @@ const depthFramePreprocessKernel = tgpu.computeFn({
   if (params.swapAxes !== 0) {
     sourceSize = sourceSize.yx;
   }
-  const side = std.min(sourceSize.x, sourceSize.y);
-  const cropOrigin = (sourceSize - side) * 0.5;
-  const sourcePixel =
-    cropOrigin + (outputPixel + 0.5) * (d.vec2f(side) / d.vec2f(params.outputSize)) - 0.5;
+  // LIGHTDEMO PATCH: full-frame anamorphic resize instead of the original
+  // center square crop - DepthART trains on square-resized (stretched)
+  // images, and stretching keeps the camera's full field of view so the
+  // depth map covers every display pixel 1:1.
+  const sourcePixel = (outputPixel + 0.5) * (sourceSize / d.vec2f(params.outputSize)) - 0.5;
   const base = std.floor(sourcePixel);
 
   let rgb = d.vec3f(0);
