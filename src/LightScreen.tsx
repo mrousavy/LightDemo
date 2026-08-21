@@ -449,9 +449,13 @@ function LightView() {
       tEnc: 0,
       tSub: 0,
       tWait: 0,
-      // Reused every frame: 24 vec4 rows = 48 packed [x, y] probe points
-      // (per-frame allocation here showed up as rare GC stutters).
-      probePoints: Array.from({ length: 24 }, () => [0, 0, 0, 0]) as number[][],
+      // GPU hand-tracking ROIs, one per slot: center/size/rotation in
+      // display-crop uv, predicted each frame from that frame's landmarks
+      // (MediaPipe's landmark-model-as-tracker loop). Vision seeds them.
+      roi: [
+        { cx: 0.5, cy: 0.5, s: 0.3, rc: 1, rs: 0, valid: false, missing: 0, fresh: false },
+        { cx: 0.5, cy: 0.5, s: 0.3, rc: 1, rs: 0, valid: false, missing: 0, fresh: false },
+      ],
     }),
     [],
   )
@@ -535,8 +539,14 @@ function LightView() {
           // of the 4:3 camera is the identity, so landmarks are full-frame
           // uv - the same space as the GPU disparity grid). Depth itself no
           // longer runs natively. ---
+          // Vision runs ONLY to (re)acquire: seed an ROI when a slot has
+          // no valid tracking. Tracking frames are 100% GPU.
+          const runVision =
+            controlsNow.handControl &&
+            (!box.roi[0]!.valid || !box.roi[1]!.valid) &&
+            box.frameCount % 3 === 0
           const tSync0 = performance.now()
-          const depth = nitro.analyzeSync(frame, rotationDeg, controlsNow.handControl, false)
+          const depth = nitro.analyzeSync(frame, rotationDeg, runVision, false)
           const tSync = performance.now() - tSync0
           const tEnc0 = performance.now()
 
@@ -588,91 +598,195 @@ function LightView() {
             infPass.dispatchWorkgroups(item.x, item.y, item.z)
           }
 
+          // 4. GPU hand tracking: for each slot with a valid ROI, sample
+          // the rotated ROI into the landmark model's input and run its
+          // ~290 dispatches. The depth probe then reads the landmark
+          // buffers ON GPU - everything chains inside this one submission.
+          const ROI_TOTAL = 224 * 224
+          for (let slot = 0; slot < 2; slot++) {
+            const roi = box.roi[slot]!
+            if (!roi.valid) continue
+            const inst = depthart.hands.instances[slot]!
+            inst.roiParams.write({
+              center: d.vec2f(roi.cx, roi.cy),
+              size: d.vec2f(roi.s, roi.s),
+              rotation: d.vec2f(roi.rc, roi.rs),
+              cropScale: d.vec2f(cropW, cropH),
+              cropOffset: d.vec2f(cropOffX, cropOffY),
+              outputSize: d.vec2u(224, 224),
+              total: ROI_TOTAL,
+            })
+            const roiBindGroup = device.createBindGroup({
+              layout: depthart.hands.roiLayoutRaw,
+              entries: [
+                { binding: 0, resource: { buffer: inst.roiParamsRaw } },
+                { binding: 1, resource: externalTexture },
+                { binding: 2, resource: depthart.preprocess.samplerRaw },
+                { binding: 3, resource: { buffer: inst.inputRaw } },
+              ],
+            })
+            infPass.setPipeline(depthart.hands.roiPipelineRaw)
+            infPass.setBindGroup(0, roiBindGroup)
+            infPass.dispatchWorkgroups(Math.ceil(ROI_TOTAL / 64))
+            for (const item of inst.dispatches) {
+              infPass.setPipeline(item.pipeline)
+              infPass.setBindGroup(0, item.bindGroup)
+              infPass.dispatchWorkgroups(item.x, item.y, item.z)
+            }
+          }
+          depthart.hands.probeParams.write({
+            outputSize: d.vec2u(depthart.depthW, depthart.depthH),
+            present: d.vec2u(box.roi[0]!.valid ? 1 : 0, box.roi[1]!.valid ? 1 : 0),
+            roi1Center: d.vec2f(box.roi[0]!.cx, box.roi[0]!.cy),
+            roi1Size: d.vec2f(box.roi[0]!.s, box.roi[0]!.s),
+            roi1Rot: d.vec2f(box.roi[0]!.rc, box.roi[0]!.rs),
+            roi2Center: d.vec2f(box.roi[1]!.cx, box.roi[1]!.cy),
+            roi2Size: d.vec2f(box.roi[1]!.s, box.roi[1]!.s),
+            roi2Rot: d.vec2f(box.roi[1]!.rc, box.roi[1]!.rs),
+          })
+          infPass.setPipeline(depthart.hands.probePipelineRaw)
+          infPass.setBindGroup(0, depthart.hands.probeBindGroupRaw)
+          infPass.dispatchWorkgroups(1)
           infPass.end()
-          // SUBMIT #1: inference starts on the GPU NOW, overlapping both
-          // the Vision wait and the probe encode below.
+          infEncoder.copyBufferToBuffer(
+            depthart.hands.instances[0]!.outputRaw, 0, depthart.staging, 0, 512,
+          )
+          infEncoder.copyBufferToBuffer(
+            depthart.hands.instances[1]!.outputRaw, 0, depthart.staging, 512, 512,
+          )
+          infEncoder.copyBufferToBuffer(
+            depthart.hands.probeResultRaw, 0, depthart.staging, 1024, 16,
+          )
+          // SUBMIT #1: depth + hands + probe start on the GPU NOW.
           device.queue.submit([infEncoder.finish()])
 
-          // Join Vision: it ran on the ANE while we encoded (and the GPU is
-          // now crunching inference in parallel) - landmarks are SAME-FRAME.
-          const tWait0 = performance.now()
-          nitro.waitForHands()
-          box.tWait = box.tWait * 0.9 + (performance.now() - tWait0) * 0.1
-          const hand = nitro.getHandResult()
+          // Acquisition only: join Vision and seed ROIs for invalid slots.
+          if (runVision) {
+            const tWait0 = performance.now()
+            nitro.waitForHands()
+            box.tWait = box.tWait * 0.9 + (performance.now() - tWait0) * 0.1
+            const vision = nitro.getHandResult()
+            const candidates = [vision.hand1, vision.hand2]
+            for (const cand of candidates) {
+              if (!cand.tracked || cand.confidence < 0.4) continue
+              // Skip hands already covered by a tracking slot.
+              let taken = false
+              for (let slot = 0; slot < 2; slot++) {
+                const roi = box.roi[slot]!
+                if (roi.valid && Math.hypot(roi.cx - cand.midX, roi.cy - cand.midY) < 0.22) {
+                  taken = true
+                }
+              }
+              if (taken) continue
+              for (let slot = 0; slot < 2; slot++) {
+                const roi = box.roi[slot]!
+                if (!roi.valid) {
+                  roi.cx = cand.midX
+                  roi.cy = cand.midY
+                  roi.s = Math.min(Math.max(cand.handSize * 3.2, 0.16), 0.85)
+                  roi.rc = 1
+                  roi.rs = 0
+                  roi.valid = true
+                  roi.missing = 0
+                  roi.fresh = true
+                  break
+                }
+              }
+            }
+          }
 
-          // 4. hand-depth probe: 5-tap crosses at thumb/index/pinch of each
-          // hand, max disparity normalized on GPU - then read back
-          // SYNCHRONOUSLY (buffer.readSync, our rnwgpu extension) so the z
-          // state machine consumes THIS frame's depth. 16 bytes, ~[gpu
-          // drain]+0.1ms.
-          const probePoints = box.probePoints
-          const PROBE_OFF = 2 / depthart.depthW
-          const PROBE_TAPS = [
-            [0, 0],
-            [-PROBE_OFF, 0],
-            [PROBE_OFF, 0],
-            [0, -PROBE_OFF],
-            [0, PROBE_OFF],
-          ]
-          let count1 = 0
-          if (hand.hand1.tracked) {
-            const anchors = [
-              [hand.hand1.thumbX, hand.hand1.thumbY],
-              [hand.hand1.indexX, hand.hand1.indexY],
-              [hand.hand1.midX, hand.hand1.midY],
-            ]
-            for (const a of anchors) {
-              for (const t of PROBE_TAPS) {
-                const row = probePoints[count1 >> 1]!
-                const lane = (count1 & 1) * 2
-                row[lane] = a[0]! + t[0]!
-                row[lane + 1] = a[1]! + t[1]!
-                count1++
-              }
-            }
-          }
-          let count2 = 0
-          if (hand.hand2.tracked) {
-            const anchors = [
-              [hand.hand2.thumbX, hand.hand2.thumbY],
-              [hand.hand2.indexX, hand.hand2.indexY],
-              [hand.hand2.midX, hand.hand2.midY],
-            ]
-            for (const a of anchors) {
-              for (const t of PROBE_TAPS) {
-                const index = 24 + count2
-                const row = probePoints[index >> 1]!
-                const lane = (index & 1) * 2
-                row[lane] = a[0]! + t[0]!
-                row[lane + 1] = a[1]! + t[1]!
-                count2++
-              }
-            }
-          }
-          depthart.probe.params.write({
-            outputSize: d.vec2u(depthart.depthW, depthart.depthH),
-            count1,
-            count2,
-            // Plain tuples are a documented fast-path write form; the TS
-            // type only advertises typed vectors.
-            points: probePoints as unknown as d.v4f[],
-          })
-          const probeEncoder = device.createCommandEncoder()
-          const probePass = probeEncoder.beginComputePass()
-          probePass.setPipeline(depthart.probe.pipelineRaw)
-          probePass.setBindGroup(0, depthart.probe.bindGroupRaw)
-          probePass.dispatchWorkgroups(1)
-          probePass.end()
-          probeEncoder.copyBufferToBuffer(
-            depthart.probeResultRaw, 0, depthart.probeStaging, 0, 16,
-          )
-          device.queue.submit([probeEncoder.finish()])
-          // Same-frame readback: blocks until submit #1 + the probe drain.
-          const gdBytes = (
-            depthart.probeStaging as unknown as { readSync(): ArrayBuffer }
+          // ONE synchronous readback for everything the CPU needs this
+          // frame: both hands' landmarks + the depth probe (readSync - our
+          // rnwgpu extension - blocks until submit #1 drains).
+          const stagingBytes = (
+            depthart.staging as unknown as { readSync(): ArrayBuffer }
           ).readSync()
-          const gdF32 = new Float32Array(gdBytes)
-          const gd = { h1: gdF32[0]!, h2: gdF32[1]!, low: gdF32[2]!, high: gdF32[3]! }
+          const sf = new Float32Array(stagingBytes)
+          const gd = { h1: sf[256]!, h2: sf[257]!, low: sf[258]!, high: sf[259]! }
+
+          // Parse landmarks per slot -> TrackedHand-shaped objects in crop
+          // space, and predict next frame's ROI from this frame's skeleton.
+          const emptyHand = {
+            tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
+            midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0,
+            disparity: -1,
+          }
+          const slotHands = [emptyHand, emptyHand]
+          for (let slot = 0; slot < 2; slot++) {
+            const roi = box.roi[slot]!
+            if (!roi.valid || roi.fresh) {
+              // fresh = seeded this frame; its graph did not run yet.
+              roi.fresh = false
+              continue
+            }
+            const base = slot * 128
+            const presence = 1 / (1 + Math.exp(-sf[base + 126]!))
+            if (presence < 0.4) {
+              roi.missing += 1
+              if (roi.missing >= 3) roi.valid = false
+              continue
+            }
+            roi.missing = 0
+            const lmx = (i: number) => {
+              const px = sf[base + i * 3]! / 224 - 0.5
+              const py = sf[base + i * 3 + 1]! / 224 - 0.5
+              return roi.cx + (px * roi.rc - py * roi.rs) * roi.s
+            }
+            const lmy = (i: number) => {
+              const px = sf[base + i * 3]! / 224 - 0.5
+              const py = sf[base + i * 3 + 1]! / 224 - 0.5
+              return roi.cy + (px * roi.rs + py * roi.rc) * roi.s
+            }
+            const wristX = lmx(0)
+            const wristY = lmy(0)
+            const thumbX = lmx(4)
+            const thumbY = lmy(4)
+            const indexX = lmx(8)
+            const indexY = lmy(8)
+            const mcpX = lmx(9)
+            const mcpY = lmy(9)
+            const handSize = Math.max(Math.hypot(mcpX - wristX, mcpY - wristY), 1e-4)
+            slotHands[slot] = {
+              tracked: true,
+              thumbX, thumbY, indexX, indexY,
+              midX: (thumbX + indexX) / 2,
+              midY: (thumbY + indexY) / 2,
+              pinchRatio: Math.hypot(thumbX - indexX, thumbY - indexY) / handSize,
+              handSize,
+              confidence: presence,
+              disparity: -1,
+            }
+            // Next-frame ROI: expanded landmark bbox, rotated hand-up.
+            let minX = 1, minY = 1, maxX = 0, maxY = 0
+            for (let i = 0; i < 21; i++) {
+              const x = lmx(i)
+              const y = lmy(i)
+              if (x < minX) minX = x
+              if (x > maxX) maxX = x
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
+            }
+            roi.cx = (minX + maxX) / 2
+            roi.cy = (minY + maxY) / 2
+            roi.s = Math.min(Math.max(Math.max(maxX - minX, maxY - minY) * 2.4, 0.14), 0.9)
+            const vx = mcpX - wristX
+            const vy = mcpY - wristY
+            const angle = Math.atan2(vx, -vy)
+            roi.rc = Math.cos(angle)
+            roi.rs = Math.sin(angle)
+          }
+          // Acquisition frames: a freshly seeded slot uses the Vision hand
+          // directly this frame (its GPU graph starts next frame).
+          const hand = { hand1: slotHands[0]!, hand2: slotHands[1]! }
+          if (runVision) {
+            const vision = nitro.getHandResult()
+            if (!hand.hand1.tracked && box.roi[0]!.valid && vision.hand1.tracked) {
+              hand.hand1 = vision.hand1
+            }
+            if (!hand.hand2.tracked && box.roi[1]!.valid && vision.hand2.tracked) {
+              hand.hand2 = vision.hand2
+            }
+          }
           const tEnc = performance.now() - tEnc0
 
           // The lighting passes get their own raw encoder (third submission).
@@ -723,8 +837,7 @@ function LightView() {
           const prevLightX = box.lightX
           const prevLightY = box.lightY
           let freshHandUpdate = false
-          if (controlsNow.handControl && hand.seq >= 0 && hand.seq !== box.lastHandSeq) {
-            box.lastHandSeq = hand.seq
+          if (controlsNow.handControl) {
             // Up to two hands; slot order is unstable across frames, so
             // continuity is matched by proximity, never by slot index.
             const hands = []
@@ -1042,7 +1155,7 @@ function LightView() {
                 `render=${(now - renderStart).toFixed(1)}ms ` +
                 `sync=${box.tSync.toFixed(1)} enc=${box.tEnc.toFixed(1)} wait=${box.tWait.toFixed(1)} sub=${box.tSub.toFixed(1)} ` +
                 `depth#${depth.seq}=${depth.inferenceTimeMs.toFixed(0)}ms ` +
-                `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
+                `roi=[${box.roi[0]!.valid ? 'T' : '.'}${box.roi[1]!.valid ? 'T' : '.'}] ` +
                 `hands=${(hand.hand1.tracked ? 1 : 0) + (hand.hand2.tracked ? 1 : 0)} ` +
                 `pinch=${hand.hand1.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
@@ -1060,7 +1173,7 @@ function LightView() {
               fps: box.fps,
               renderTimeMs: now - renderStart,
               depthTimeMs: depth.inferenceTimeMs,
-              handTimeMs: hand.detectionTimeMs,
+              handTimeMs: 0,
               frameWidth: frame.width,
               frameHeight: frame.height,
               frameOrientation: frame.orientation,
@@ -1073,7 +1186,7 @@ function LightView() {
               pinchRatio: Math.min(hand.hand1.pinchRatio, hand.hand2.pinchRatio),
               grabbed: box.grabbed,
               depthSeq: depth.seq,
-              handSeq: hand.seq,
+              handSeq: box.frameCount,
             })
           }
         } finally {

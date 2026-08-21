@@ -26,80 +26,159 @@ import {
 } from './depthart/preprocess'
 import { DepthTensorArena } from './depthart/tensor-arena'
 
-// GPU hand-depth probe: samples the disparity buffer at up to 2x21 Vision
-// landmarks and takes the per-hand MAX (nearest), normalized by the GPU
-// 2-98% range - the depth map is never read by the CPU. The tiny result
-// buffer (norm1, norm2, low, high) is read back asynchronously on the main
-// JS thread at ~30Hz; the 1-frame staleness disappears inside the z EMA.
-export const ProbeParams = d.struct({
+// --- GPU hand tracking kernels ---
+//
+// ROI preprocessor: samples a rotated square region of the camera frame
+// into the hand-landmark model's [1,3,224,224] input ([0,1] RGB, hwc4).
+// The ROI lives in display-crop uv space; rotation aligns the hand upright
+// (wrist -> middle-MCP pointing up), which the model needs (presence drops
+// from ~0.6 to ~0.03 on sideways hands).
+export const RoiParams = d.struct({
+  center: d.vec2f,
+  size: d.vec2f,
+  rotation: d.vec2f, // (cos, sin)
+  cropScale: d.vec2f, // crop uv -> oriented camera uv
+  cropOffset: d.vec2f,
   outputSize: d.vec2u,
-  count1: d.u32,
-  count2: d.u32,
-  // 48 probe points packed two-per-vec4 (xy, zw): a vec2f array in a
-  // uniform has stride 8, which is not a portable uniform layout.
-  points: d.arrayOf(d.vec4f, 24),
+  total: d.u32,
 })
 
-export const probeLayout = tgpu.bindGroupLayout({
-  params: { uniform: ProbeParams },
+export const roiLayout = tgpu.bindGroupLayout({
+  params: { uniform: RoiParams },
+  frame: { externalTexture: d.textureExternal() },
+  sampler: { sampler: 'filtering' },
+  output: { storage: d.arrayOf(d.vec4f), access: 'mutable' },
+})
+
+export const roiPreprocessKernel = tgpu.computeFn({
+  in: { gid: d.builtin.globalInvocationId },
+  workgroupSize: [64],
+})(({ gid }) => {
+  'use gpu'
+  const p = roiLayout.$.params
+  const index = gid.x
+  if (index >= p.total) {
+    return
+  }
+  const ox = index % p.outputSize.x
+  const oy = std.intdiv(index, p.outputSize.x)
+  const local = d.vec2f(
+    (d.f32(ox) + 0.5) / d.f32(p.outputSize.x) - 0.5,
+    (d.f32(oy) + 0.5) / d.f32(p.outputSize.y) - 0.5,
+  )
+  const rotated = d.vec2f(
+    local.x * p.rotation.x - local.y * p.rotation.y,
+    local.x * p.rotation.y + local.y * p.rotation.x,
+  )
+  const cropUv = d.vec2f(
+    p.center.x + rotated.x * p.size.x,
+    p.center.y + rotated.y * p.size.y,
+  )
+  const cameraUv = d.vec2f(
+    p.cropOffset.x + cropUv.x * p.cropScale.x,
+    p.cropOffset.y + cropUv.y * p.cropScale.y,
+  )
+  const rgb = std.textureSampleBaseClampToEdge(
+    roiLayout.$.frame,
+    roiLayout.$.sampler,
+    cameraUv,
+  ).rgb
+  roiLayout.$.output[index] = d.vec4f(rgb, 0)
+})
+
+// Hand-depth probe v2: reads the hand-landmark OUTPUT BUFFERS directly on
+// the GPU (all 21 landmarks per hand, transformed ROI -> crop space), takes
+// the per-hand max disparity normalized by the GPU range. Chained after the
+// landmark graphs in the same submission - no CPU sees any of it until the
+// single readSync.
+export const HandProbeParams = d.struct({
+  outputSize: d.vec2u, // disparity grid size
+  present: d.vec2u, // per-slot: hand graph ran this frame
+  roi1Center: d.vec2f,
+  roi1Size: d.vec2f,
+  roi1Rot: d.vec2f,
+  roi2Center: d.vec2f,
+  roi2Size: d.vec2f,
+  roi2Rot: d.vec2f,
+})
+
+export const handProbeLayout = tgpu.bindGroupLayout({
+  params: { uniform: HandProbeParams },
   disparity: { storage: d.arrayOf(d.vec4f) },
   range: { storage: d.vec2f },
+  lm1: { storage: d.arrayOf(d.f32) },
+  lm2: { storage: d.arrayOf(d.f32) },
   result: { storage: d.vec4f, access: 'mutable' },
 })
 
-const handMaxDisparity = (first: number, count: number) => {
+export const handDepthProbeKernel = tgpu.computeFn({ workgroupSize: [1] })(() => {
   'use gpu'
-  const params = probeLayout.$.params
-  let best = d.f32(-1)
-  for (let i = d.i32(0); i < count; i++) {
-    const index = d.u32(first + i)
-    const pair = params.points[index >> 1]
-    const point = (index & 1) === 0 ? pair.xy : pair.zw
-    const x = std.clamp(
-      d.u32(point.x * d.f32(params.outputSize.x)),
-      d.u32(0),
-      params.outputSize.x - 1,
-    )
-    const y = std.clamp(
-      d.u32(point.y * d.f32(params.outputSize.y)),
-      d.u32(0),
-      params.outputSize.y - 1,
-    )
-    const value = probeLayout.$.disparity[y * params.outputSize.x + x].x
-    best = std.max(best, value)
-  }
-  return best
-}
-
-export const handProbeKernel = tgpu.computeFn({ workgroupSize: [1] })(() => {
-  'use gpu'
-  const params = probeLayout.$.params
-  const low = probeLayout.$.range.x
-  const span = std.max(probeLayout.$.range.y - low, 0.001)
-  const best1 = handMaxDisparity(0, d.i32(params.count1))
-  const best2 = handMaxDisparity(24, d.i32(params.count2))
+  const p = handProbeLayout.$.params
+  const low = handProbeLayout.$.range.x
+  const span = std.max(handProbeLayout.$.range.y - low, 0.001)
   let norm1 = d.f32(-1)
-  if (best1 >= 0) {
-    norm1 = std.clamp((best1 - low) / span, 0, 1)
-  }
   let norm2 = d.f32(-1)
-  if (best2 >= 0) {
-    norm2 = std.clamp((best2 - low) / span, 0, 1)
+  for (let h = d.u32(0); h < 2; h++) {
+    let present = p.present.x
+    let center = d.vec2f(p.roi1Center)
+    let size = d.vec2f(p.roi1Size)
+    let rot = d.vec2f(p.roi1Rot)
+    if (h !== 0) {
+      present = p.present.y
+      center = d.vec2f(p.roi2Center)
+      size = d.vec2f(p.roi2Size)
+      rot = d.vec2f(p.roi2Rot)
+    }
+    if (present !== 0) {
+      let best = d.f32(-1)
+      for (let i = d.u32(0); i < 21; i++) {
+        let lxRaw = handProbeLayout.$.lm1[i * 3]!
+        let lyRaw = handProbeLayout.$.lm1[i * 3 + 1]!
+        if (h !== 0) {
+          lxRaw = handProbeLayout.$.lm2[i * 3]!
+          lyRaw = handProbeLayout.$.lm2[i * 3 + 1]!
+        }
+        const lx = lxRaw / 224.0 - 0.5
+        const ly = lyRaw / 224.0 - 0.5
+        const u = center.x + (lx * rot.x - ly * rot.y) * size.x
+        const v = center.y + (lx * rot.y + ly * rot.x) * size.y
+        const gx = std.clamp(u * d.f32(p.outputSize.x), 0, d.f32(p.outputSize.x - 1))
+        const gy = std.clamp(v * d.f32(p.outputSize.y), 0, d.f32(p.outputSize.y - 1))
+        const value =
+          handProbeLayout.$.disparity[d.u32(gy) * p.outputSize.x + d.u32(gx)].x
+        best = std.max(best, value)
+      }
+      const norm = std.clamp((best - low) / span, 0, 1)
+      if (h === 0) {
+        if (best >= 0) {
+          norm1 = norm
+        }
+      } else {
+        if (best >= 0) {
+          norm2 = norm
+        }
+      }
+    }
   }
-  probeLayout.$.result = d.vec4f(norm1, norm2, low, probeLayout.$.range.y)
+  handProbeLayout.$.result = d.vec4f(norm1, norm2, low, handProbeLayout.$.range.y)
 })
 
-// Everything the worklet touches per frame is a PRE-UNWRAPPED raw WebGPU
-// handle: TypeGPU's typed dispatch recording (lazy state objects, layout
-// checks) measured ~6.5ms/frame for the ~270 dispatches in Hermes; raw
-// setPipeline/setBindGroup/dispatchWorkgroups is a fraction of that. The
-// only TypeGPU objects still used per frame are two uniform .write()s.
 export interface RawDispatch {
   pipeline: GPUComputePipeline
   bindGroup: GPUBindGroup
   x: number
   y: number
   z: number
+}
+
+export interface HandGraphInstance {
+  // Per-slot dedicated graph: own arena + weights (2.4MB, trivial), so two
+  // hands run independently in the same submission.
+  dispatches: readonly RawDispatch[]
+  roiParams: TgpuUniform<typeof RoiParams>
+  roiParamsRaw: GPUBuffer
+  inputRaw: GPUBuffer
+  outputRaw: GPUBuffer
 }
 
 export interface DepthartRunner {
@@ -117,36 +196,40 @@ export interface DepthartRunner {
     total: number
   }
   range: readonly RawDispatch[]
-  probe: {
-    pipelineRaw: GPUComputePipeline
-    params: TgpuUniform<typeof ProbeParams>
-    bindGroupRaw: GPUBindGroup
+  // GPU hand tracking: ROI preprocess + landmark graph per slot, plus the
+  // landmark-reading depth probe. One combined staging buffer feeds the
+  // single per-frame readSync: [0..511] hand1 landmarks (128 f32),
+  // [512..1023] hand2, [1024..1039] probe (norm1, norm2, low, high).
+  hands: {
+    roiPipelineRaw: GPUComputePipeline
+    roiLayoutRaw: GPUBindGroupLayout
+    instances: readonly [HandGraphInstance, HandGraphInstance]
+    probePipelineRaw: GPUComputePipeline
+    probeParams: TgpuUniform<typeof HandProbeParams>
+    probeBindGroupRaw: GPUBindGroup
+    probeResultRaw: GPUBuffer
   }
-  // Raw GPUBuffers for the raw-WebGPU lighting passes.
   disparityRawBuffer: GPUBuffer
   rangeRawBuffer: GPUBuffer
-  probeResultRaw: GPUBuffer
-  // MAP_READ staging for the same-frame readSync of the probe result.
-  probeStaging: GPUBuffer
+  staging: GPUBuffer
 }
 
-export async function createDepthartRunner(device: GPUDevice): Promise<DepthartRunner> {
-  const root = tgpu.initFromDevice({ device })
+const HAND_LM_BYTES = 512
+export const STAGING_LAYOUT = {
+  hand1: 0,
+  hand2: HAND_LM_BYTES,
+  probe: HAND_LM_BYTES * 2,
+  total: HAND_LM_BYTES * 2 + 16,
+}
 
-  const asset = Image.resolveAssetSource(
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    require('../assets/depthart-relative-s-448-balanced.depthart'),
-  )
-  if (asset?.uri == null) throw new Error('DepthART bundle asset not resolvable')
+async function fetchBundle(moduleId: number): Promise<ReturnType<typeof parseDepthBundle>> {
+  const asset = Image.resolveAssetSource(moduleId)
+  if (asset?.uri == null) throw new Error('bundle asset not resolvable')
   const response = await fetch(asset.uri)
-  const bytes = await response.arrayBuffer()
-  const bundle = parseDepthBundle(bytes)
+  return parseDepthBundle(await response.arrayBuffer())
+}
 
-  const inputTensor = bundle.tensorById.get(bundle.input.tensorId)!
-  const outputTensor = bundle.tensorById.get(bundle.output.tensorId)!
-  const [, , inputHeight, inputWidth] = inputTensor.shape
-  const [, , outputHeight, outputWidth] = outputTensor.shape
-
+function loadGraph(root: TgpuRoot, bundle: ReturnType<typeof parseDepthBundle>) {
   const arena = new DepthTensorArena(root, bundle)
   const weights = createImmutableWeightStorage(
     root,
@@ -154,6 +237,40 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
     outerProductPointwiseWeights(bundle),
   )
   const prepared = createDepthDispatches(root, bundle, arena, weights)
+  return { arena, prepared }
+}
+
+function unwrapDispatches(
+  root: TgpuRoot,
+  prepared: ReturnType<typeof createDepthDispatches>,
+): RawDispatch[] {
+  return prepared.dispatches.map((item) => ({
+    pipeline: root.unwrap(item.pipeline),
+    bindGroup: root.unwrap(item.bindGroup),
+    x: item.workgroups.x,
+    y: item.workgroups.y ?? 1,
+    z: item.workgroups.z ?? 1,
+  }))
+}
+
+export async function createDepthartRunner(device: GPUDevice): Promise<DepthartRunner> {
+  const root = tgpu.initFromDevice({ device })
+
+  const depthBundle = await fetchBundle(
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('../assets/depthart-relative-s-448-balanced.depthart'),
+  )
+  const handBundle = await fetchBundle(
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('../assets/hand-landmark-lite-224.depthart'),
+  )
+
+  const depthInput = depthBundle.tensorById.get(depthBundle.input.tensorId)!
+  const [, , inputHeight, inputWidth] = depthInput.shape
+
+  const depth = loadGraph(root, depthBundle)
+  const hand1 = loadGraph(root, handBundle)
+  const hand2 = loadGraph(root, handBundle)
 
   const preParams = root.createUniform(FrameParams)
   const preSampler = root.createSampler({ magFilter: 'nearest', minFilter: 'nearest' })
@@ -161,33 +278,35 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
 
   const rangeBuffer = root.createBuffer(d.vec2f).$usage('storage')
   const rangeEstimator = new DepthDisparityRangeEstimator(root)
-  rangeEstimator.attach(arena.outputBuffer, rangeBuffer, outputWidth * outputHeight)
+  rangeEstimator.attach(
+    depth.arena.outputBuffer,
+    rangeBuffer,
+    inputWidth * inputHeight,
+  )
 
-  const probeParams = root.createUniform(ProbeParams)
+  const roiPipeline = root.createComputePipeline({ compute: roiPreprocessKernel })
+  const roi1Params = root.createUniform(RoiParams)
+  const roi2Params = root.createUniform(RoiParams)
+
+  const probeParams = root.createUniform(HandProbeParams)
   const probeResult = root.createBuffer(d.vec4f).$usage('storage')
-  const probePipeline = root.createComputePipeline({ compute: handProbeKernel })
-  const probeBindGroup = root.createBindGroup(probeLayout, {
-    params: probeParams,
-    disparity: arena.outputBuffer,
-    range: rangeBuffer,
-    result: probeResult,
-  })
+  const probePipeline = root.createComputePipeline({ compute: handDepthProbeKernel })
 
-  const uniquePipelines = [...new Set(prepared.dispatches.map((item) => item.pipeline))]
+  const graphPipelines = [
+    ...new Set(
+      [...depth.prepared.dispatches, ...hand1.prepared.dispatches, ...hand2.prepared.dispatches].map(
+        (item) => item.pipeline,
+      ),
+    ),
+  ]
   await Promise.all([
     prePipeline.initAsync(),
+    roiPipeline.initAsync(),
     probePipeline.initAsync(),
     rangeEstimator.initAsync(),
-    ...uniquePipelines.map((pipeline) => pipeline.initAsync()),
+    ...graphPipelines.map((pipeline) => pipeline.initAsync()),
   ])
 
-  const rawDispatches: RawDispatch[] = prepared.dispatches.map((item) => ({
-    pipeline: root.unwrap(item.pipeline),
-    bindGroup: root.unwrap(item.bindGroup),
-    x: item.workgroups.x,
-    y: item.workgroups.y ?? 1,
-    z: item.workgroups.z ?? 1,
-  }))
   const rangeParts = rangeEstimator.parts
   const rawRange: RawDispatch[] = rangeParts.pipelines.map((pipeline, i) => ({
     pipeline: root.unwrap(pipeline),
@@ -197,33 +316,65 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
     z: 1,
   }))
 
+  // The probe bind group is fully static (no external texture): raw once.
+  const probePipelineRaw = root.unwrap(probePipeline)
+  const probeBindGroupRaw = device.createBindGroup({
+    layout: probePipelineRaw.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: root.unwrap(probeParams.buffer) } },
+      { binding: 1, resource: { buffer: depth.arena.outputBuffer.buffer } },
+      { binding: 2, resource: { buffer: rangeBuffer.buffer } },
+      { binding: 3, resource: { buffer: hand1.arena.outputBuffer.buffer } },
+      { binding: 4, resource: { buffer: hand2.arena.outputBuffer.buffer } },
+      { binding: 5, resource: { buffer: probeResult.buffer } },
+    ],
+  })
+
   return {
     root,
     depthW: inputWidth,
     depthH: inputHeight,
-    dispatches: rawDispatches,
+    dispatches: unwrapDispatches(root, depth.prepared),
     preprocess: {
       pipelineRaw: root.unwrap(prePipeline),
       layoutRaw: root.unwrap(preprocessLayout),
       params: preParams,
       paramsRaw: root.unwrap(preParams.buffer),
       samplerRaw: root.unwrap(preSampler),
-      outputRaw: arena.inputBuffer.buffer,
+      outputRaw: depth.arena.inputBuffer.buffer,
       total: inputWidth * inputHeight,
     },
     range: rawRange,
-    probe: {
-      pipelineRaw: root.unwrap(probePipeline),
-      params: probeParams,
-      bindGroupRaw: root.unwrap(probeBindGroup),
+    hands: {
+      roiPipelineRaw: root.unwrap(roiPipeline),
+      roiLayoutRaw: root.unwrap(roiLayout),
+      instances: [
+        {
+          dispatches: unwrapDispatches(root, hand1.prepared),
+          roiParams: roi1Params,
+          roiParamsRaw: root.unwrap(roi1Params.buffer),
+          inputRaw: hand1.arena.inputBuffer.buffer,
+          outputRaw: hand1.arena.outputBuffer.buffer,
+        },
+        {
+          dispatches: unwrapDispatches(root, hand2.prepared),
+          roiParams: roi2Params,
+          roiParamsRaw: root.unwrap(roi2Params.buffer),
+          inputRaw: hand2.arena.inputBuffer.buffer,
+          outputRaw: hand2.arena.outputBuffer.buffer,
+        },
+      ],
+      probePipelineRaw,
+      probeParams,
+      probeBindGroupRaw,
+      probeResultRaw: probeResult.buffer,
     },
-    disparityRawBuffer: arena.outputBuffer.buffer,
+    disparityRawBuffer: depth.arena.outputBuffer.buffer,
     rangeRawBuffer: rangeBuffer.buffer,
-    probeResultRaw: probeResult.buffer,
-    probeStaging: device.createBuffer({
-      size: 16,
+    staging: device.createBuffer({
+      size: STAGING_LAYOUT.total,
       usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
-      label: 'probe-staging',
+      label: 'hand-depth-staging',
     }),
   }
 }
