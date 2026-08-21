@@ -31,11 +31,13 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     .workingColorSpace: NSNull(),
     .cacheIntermediates: true,
   ])
-  private var inputBuffer: CVPixelBuffer?
+  private var inputBuffers: [CVPixelBuffer?] = [nil, nil]
+  private var inputParity = 0
   // Reused every prediction: MLFeatureValue holds the pixel buffer by
   // reference, so CoreML sees the freshly rendered contents each frame
   // without per-frame provider/NSObject allocations.
   private var inputProvider: MLDictionaryFeatureProvider?
+  private var lastProvidedInput: CVPixelBuffer?
 
   // Persistent Vision objects: VNSequenceRequestHandler caches state across
   // video frames and avoids the per-frame handler setup cost.
@@ -61,6 +63,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   /// Runs Vision hand detection concurrently with the ANE depth prediction
   /// inside analyzeSync (joined before it returns).
   private let handQueue = DispatchQueue(label: "com.mrousavy.lightdemo.hands", qos: .userInteractive)
+  private var handBusy = false
 
   // One persistent IOSurface-backed output buffer, handed to CoreML via
   // MLPredictionOptions.outputBackings - the model writes depth into the
@@ -171,15 +174,35 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     }
     let prepDone = CACurrentMediaTime()
     if runHands {
-      let group = DispatchGroup()
-      group.enter()
-      handQueue.async { [self] in
-        detectHands(onPreparedInput: input)
-        group.leave()
+      if runDepth {
+        let group = DispatchGroup()
+        group.enter()
+        handQueue.async { [self] in
+          detectHands(onPreparedInput: input)
+          group.leave()
+        }
+        predictDepth(on: input, start: start, prepDone: prepDone)
+        group.wait()
+        attachHandDepth()
+      } else {
+        // GPU-depth mode: fire Vision WITHOUT waiting - the caller consumes
+        // last frame's landmarks via getHandResult (one frame of landmark
+        // staleness is invisible; blocking cost ~20ms of every frame).
+        // Ping-pong input buffers prevent the next frame's prep render from
+        // tearing the buffer Vision is still reading.
+        lock.lock()
+        let busy = handBusy
+        if !busy { handBusy = true }
+        lock.unlock()
+        if !busy {
+          handQueue.async { [self] in
+            detectHands(onPreparedInput: input)
+            lock.lock()
+            handBusy = false
+            lock.unlock()
+          }
+        }
       }
-      if runDepth { predictDepth(on: input, start: start, prepDone: prepDone) }
-      group.wait()
-      if runDepth { attachHandDepth() }
     } else if runDepth {
       predictDepth(on: input, start: start, prepDone: prepDone)
     }
@@ -205,16 +228,21 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private func prepareModelInput(
     from source: CVPixelBuffer, orientation: CGImagePropertyOrientation
   ) -> CVPixelBuffer? {
-    if inputBuffer == nil {
+    // Two buffers, alternating per call: the async Vision pass may still be
+    // reading the previous frame's buffer while this render runs.
+    inputParity = 1 - inputParity
+    if inputBuffers[inputParity] == nil {
       let attributes: [CFString: Any] = [
         kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
         kCVPixelBufferMetalCompatibilityKey: true,
       ]
+      var created: CVPixelBuffer?
       CVPixelBufferCreate(
         kCFAllocatorDefault, modelWidth, modelHeight, kCVPixelFormatType_32BGRA,
-        attributes as CFDictionary, &inputBuffer)
+        attributes as CFDictionary, &created)
+      inputBuffers[inputParity] = created
     }
-    guard let target = inputBuffer else { return nil }
+    guard let target = inputBuffers[inputParity] else { return nil }
 
     var image = CIImage(cvPixelBuffer: source)
     if orientation != .up {
@@ -245,9 +273,12 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   ) {
     let output: CVPixelBuffer
     do {
-      if inputProvider == nil {
+      // Input buffers ping-pong now (async Vision reads the other one), so
+      // the provider must track the buffer actually rendered this frame.
+      if inputProvider == nil || lastProvidedInput !== input {
         inputProvider = try MLDictionaryFeatureProvider(
           dictionary: [modelInputName: MLFeatureValue(pixelBuffer: input)])
+        lastProvidedInput = input
       }
       let prediction = try mlModel.prediction(from: inputProvider!, options: predictionOptions)
       guard let buffer = prediction.featureValue(for: modelOutputName)?.imageBufferValue

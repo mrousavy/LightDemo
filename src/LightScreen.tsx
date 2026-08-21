@@ -84,6 +84,10 @@ const DEFAULT_CONTROLS: LightControls = {
 
 const MODE_NAMES = ['Relit', 'Camera', 'Depth', 'Normals']
 
+// The Insta360's sensor aspect: what the display shows and the depth model
+// covers (centered crop of the oriented frame).
+const DISPLAY_ASPECT = 4 / 3
+
 // Stable identities - inline literals would recreate the frame output /
 // reconfigure the session on every React render.
 // The Insta360's sensor is native 4:3 (up to 3840x2880); its 16:9 modes are
@@ -440,6 +444,9 @@ function LightView() {
       velY: 0,
       lostFrames: 0,
       depthEverRun: false,
+      tSync: 0,
+      tEnc: 0,
+      tSub: 0,
     }),
     [],
   )
@@ -541,12 +548,19 @@ function LightView() {
           const dispW = rotated ? videoFrame.height : videoFrame.width
           const dispH = rotated ? videoFrame.width : videoFrame.height
 
-          // The DepthART preprocessor squeezes the FULL frame into its
-          // square input (no crop), so depth uv == display uv everywhere.
-          const cropW = 1
-          const cropH = 1
-          const cropOffX = 0
-          const cropOffY = 0
+          // The oriented camera frame is PORTRAIT 3:4 (the Insta360 delivers
+          // a rotated buffer); display and depth both use its centered 4:3
+          // landscape crop - the same region the old CoreML prep extracted.
+          const frameAspect = dispW / dispH
+          let cropW = 1
+          let cropH = 1
+          if (frameAspect > DISPLAY_ASPECT) {
+            cropW = DISPLAY_ASPECT / frameAspect
+          } else {
+            cropH = frameAspect / DISPLAY_ASPECT
+          }
+          const cropOffX = (1 - cropW) / 2
+          const cropOffY = (1 - cropH) / 2
 
           // Imported once per frame (external textures expire each frame),
           // used by BOTH the JBU guide fetch and the relight pass.
@@ -560,8 +574,11 @@ function LightView() {
           // of the 4:3 camera is the identity, so landmarks are full-frame
           // uv - the same space as the GPU disparity grid). Depth itself no
           // longer runs natively. ---
+          const tSync0 = performance.now()
           const depth = nitro.analyzeSync(frame, rotationDeg, controlsNow.handControl, false)
           const hand = nitro.getHandResult()
+          const tSync = performance.now() - tSync0
+          const tEnc0 = performance.now()
 
           // --- DepthART inference: a typed TypeGPU encoder wraps the whole
           // frame; the raw lighting passes below record into the SAME
@@ -569,14 +586,14 @@ function LightView() {
           const tgpuEncoder = depthart.root['~unstable'].createCommandEncoder()
           const infPass = tgpuEncoder.beginComputePass()
 
-          // 1. camera -> normalized [1,3,448,448] input tensor (bicubic,
-          // rotation via uvTransform, full-frame anamorphic squeeze).
-          let uvT = d.mat2x2f(1, 0, 0, 1)
-          if (rotationDeg === 90) uvT = d.mat2x2f(0, -1, 1, 0)
-          else if (rotationDeg === 180) uvT = d.mat2x2f(-1, 0, 0, -1)
-          else if (rotationDeg === 270) uvT = d.mat2x2f(0, 1, -1, 0)
+          // 1. camera -> normalized [1,3,448,448] input tensor. The external
+          // texture import already BAKES the display rotation into uv space
+          // (that is what keeps the camera view upright), so the transform
+          // must NOT rotate again - it is a pure center-crop scale that
+          // selects the same 4:3 region the display shows, squeezed
+          // anamorphically into the square model input.
           depthart.preprocess.params.write({
-            uvTransform: uvT,
+            uvTransform: d.mat2x2f(cropW, 0, 0, cropH),
             outputSize: d.vec2u(depthart.depthW, depthart.depthH),
             mirrorX: 0,
             swapAxes: rotated ? 1 : 0,
@@ -668,6 +685,7 @@ function LightView() {
             .with(depthart.probe.bindGroup)
             .dispatchWorkgroups(1)
           infPass.end()
+          const tEnc = performance.now() - tEnc0
 
           // Everything below records RAW WebGPU into the same encoder.
           const encoder = depthart.root.unwrap(tgpuEncoder) as GPUCommandEncoder
@@ -982,9 +1000,8 @@ function LightView() {
           rpF32[12] = controlsNow.occlusion
           rpU32[13] = controlsNow.mode
           rpU32[14] = mirrored ? 1 : 0
-          // Canvas aspect for the shader's world-space distance math (the
-          // depth grid is anamorphic; the DISPLAY is what world units live in).
-          rpF32[15] = dispW / dispH
+          // World-space aspect: the displayed region is the 4:3 crop.
+          rpF32[15] = DISPLAY_ASPECT
           rpF32[16] = cropW
           rpF32[17] = cropH
           rpF32[18] = cropOffX
@@ -1016,9 +1033,14 @@ function LightView() {
           pass.setBindGroup(0, bindGroup)
           pass.draw(3)
           pass.end()
+          const tSub0 = performance.now()
           device.queue.submit([encoder.finish()])
           pipeline.context.present()
           externalTexture.destroy()
+          const tSub = performance.now() - tSub0
+          box.tSync = box.tSync * 0.9 + tSync * 0.1
+          box.tEnc = box.tEnc * 0.9 + tEnc * 0.1
+          box.tSub = box.tSub * 0.9 + tSub * 0.1
 
           // --- stats ---
           box.frameCount += 1
@@ -1032,6 +1054,7 @@ function LightView() {
             console.log(
               `[LightDemo] #${box.frameCount} ${box.fps.toFixed(0)}fps ` +
                 `render=${(now - renderStart).toFixed(1)}ms ` +
+                `sync=${box.tSync.toFixed(1)} enc=${box.tEnc.toFixed(1)} sub=${box.tSub.toFixed(1)} ` +
                 `depth#${depth.seq}=${depth.inferenceTimeMs.toFixed(0)}ms ` +
                 `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
                 `hands=${(hand.hand1.tracked ? 1 : 0) + (hand.hand2.tracked ? 1 : 0)} ` +
@@ -1249,7 +1272,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  canvas: { flex: 1 },
+  canvas: { alignSelf: 'center', width: '100%', maxHeight: '100%', aspectRatio: 4 / 3 },
   center: {
     flex: 1,
     backgroundColor: 'black',
