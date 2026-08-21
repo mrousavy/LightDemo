@@ -34,6 +34,8 @@ export const preprocessLayout = tgpu.bindGroupLayout({
   frame: { externalTexture: d.textureExternal() },
   sampler: { sampler: 'filtering' },
   output: { storage: d.arrayOf(d.vec4f), access: 'mutable' },
+  // LIGHTDEMO PATCH: raw model-grid luma for the JBU guide (see kernel).
+  luma: { storage: d.arrayOf(d.f32), access: 'mutable' },
 });
 
 function cubicWeight(distance: number): number {
@@ -104,6 +106,13 @@ export const depthFramePreprocessKernel = tgpu.computeFn({
   const mean = d.vec3f(0.485, 0.456, 0.406);
   const deviation = d.vec3f(0.229, 0.224, 0.225);
   preprocessLayout.$.output[index] = d.vec4f((rgb - mean) / deviation, 0);
+  // LIGHTDEMO PATCH: also publish the RAW luma of the model grid so the JBU
+  // guide taps read a plain buffer instead of re-sampling (and
+  // YUV-converting) the camera texture 16x per field texel.
+  preprocessLayout.$.luma[index] = std.dot(
+    std.clamp(rgb, d.vec3f(0), d.vec3f(1)),
+    d.vec3f(0.2126, 0.7152, 0.0722),
+  );
 });
 
 export class DepthFramePreprocessor {
@@ -111,6 +120,7 @@ export class DepthFramePreprocessor {
   readonly #output: Hwc4TensorBuffer;
   readonly #outputSize: readonly [number, number];
   readonly #params: TgpuUniform<typeof FrameParams>;
+  readonly #luma;
   readonly #pipeline: TgpuComputePipeline;
   readonly #sampler: TgpuSampler;
 
@@ -119,6 +129,9 @@ export class DepthFramePreprocessor {
     this.#output = output;
     this.#outputSize = outputSize;
     this.#params = root.createUniform(FrameParams);
+    this.#luma = root
+      .createBuffer(d.arrayOf(d.f32, outputSize[0] * outputSize[1]))
+      .$usage('storage');
     this.#sampler = root.createSampler({
       magFilter: 'nearest',
       minFilter: 'nearest',
@@ -146,6 +159,7 @@ export class DepthFramePreprocessor {
       frame,
       sampler: this.#sampler,
       output: this.#output,
+      luma: this.#luma,
     });
     this.#pipeline
       .with(pass)

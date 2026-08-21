@@ -29,8 +29,21 @@ import {
   type LightStatus,
 } from 'light-native'
 import { d } from 'typegpu'
-import { createDepthartRunner, type DepthartRunner } from './depthartRunner'
+import { createDepthartRunner, STAGING_LAYOUT, type DepthartRunner } from './depthartRunner'
 import { DEPTH_PREPARE_SHADER, RELIGHT_SHADER, SURFACE_SHADER } from './shaders'
+
+// --- GPU profiling (timestamp-query) ---
+// When the adapter offers 'timestamp-query', every frame is bracketed into
+// 13 timing slots resolved into the SAME staging readback the hands use
+// (zero extra sync): 0 preprocess, 1-6 depth-model sixths, 7 range,
+// 8/9 hand graphs, 10 probe, 11 JBU+surface (previous frame's), 12 relight
+// (previous frame's - encoder-2 queries are resolved one frame later).
+const PROFILE_MODEL_BUCKETS = 6
+const PROFILE_SLOTS = 13
+// == STAGING_LAYOUT.queries. Literal because the worklet must not touch the
+// depthartRunner import (bundleMode would require() the whole module - and
+// its TurboModule dependencies - on the worklet runtime). Asserted at init.
+const QUERY_STAGING_OFFSET = 1040
 
 const REQUIRED_FEATURES: GPUFeatureName[] = [
   'rnwebgpu/native-texture' as GPUFeatureName,
@@ -99,6 +112,7 @@ const CAMERA_CONSTRAINTS = [{ fps: 30 }]
 
 interface PipelineState {
   context: RNCanvasContext
+  profile: { querySet: GPUQuerySet; resolveBuffer: GPUBuffer } | null
   sampler: GPUSampler
   depthPreparePipeline: GPUComputePipeline
   surfacePipeline: GPUComputePipeline
@@ -156,8 +170,15 @@ function LightView() {
       try {
         const adapter = await navigator.gpu.requestAdapter()
         if (adapter == null) throw new Error('requestAdapter returned null')
+        const features = [...REQUIRED_FEATURES]
+        if (adapter.features.has('timestamp-query')) {
+          features.push('timestamp-query')
+        }
+        console.log(
+          `[LightDemo] timestamp-query ${adapter.features.has('timestamp-query') ? 'available' : 'NOT available'}`,
+        )
         const gpuDevice = await adapter.requestDevice({
-          requiredFeatures: REQUIRED_FEATURES,
+          requiredFeatures: features,
         })
         if (!cancelled) setDevice(gpuDevice)
       } catch (e) {
@@ -226,8 +247,16 @@ function LightView() {
     const context = ref.current?.getContext('webgpu')
     if (context == null) return
     const canvas = context.canvas as unknown as NativeCanvas
-    canvas.width = canvas.clientWidth * PixelRatio.get()
-    canvas.height = canvas.clientHeight * PixelRatio.get()
+    // Cap the backing store: the relight fragment runs a 40-step shadow
+    // march per pixel, which measured 3.6ms at full Retina resolution. The
+    // upstream demo caps at 1024x1024; 1280x960 matches its pixel count on
+    // our 4:3 canvas, and the window scales it back up.
+    const backingScale = Math.min(
+      PixelRatio.get(),
+      1280 / Math.max(canvas.clientWidth, 1),
+    )
+    canvas.width = Math.round(canvas.clientWidth * backingScale)
+    canvas.height = Math.round(canvas.clientHeight * backingScale)
     const format = navigator.gpu.getPreferredCanvasFormat()
     context.configure({ device, format, alphaMode: 'opaque' })
 
@@ -288,8 +317,28 @@ function LightView() {
       ],
     })
 
+    const profile = device.features.has('timestamp-query')
+      ? {
+          querySet: device.createQuerySet({ type: 'timestamp', count: 32 }),
+          // resolveQuerySet offsets must be 256-aligned: [0] holds the 22
+          // encoder-1 queries, [256] the 4 lagged encoder-2 queries.
+          resolveBuffer: device.createBuffer({
+            size: 512,
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+          }),
+        }
+      : null
+    console.log(`[LightDemo] GPU profiling ${profile != null ? 'ON' : 'off'}`)
+    if (QUERY_STAGING_OFFSET !== STAGING_LAYOUT.queries) {
+      setError(
+        `QUERY_STAGING_OFFSET ${QUERY_STAGING_OFFSET} != STAGING_LAYOUT.queries ${STAGING_LAYOUT.queries}`,
+      )
+      return
+    }
+
     setPipeline({
       context,
+      profile,
       sampler,
       depthPreparePipeline,
       surfacePipeline,
@@ -449,6 +498,9 @@ function LightView() {
       tEnc: 0,
       tSub: 0,
       tWait: 0,
+      tEncCpu: 0,
+      tRead: 0,
+      gpuT: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
       // GPU hand-tracking ROIs, one per slot: center/size/rotation in
       // display-crop uv, predicted each frame from that frame's landmarks
       // (MediaPipe's landmark-model-as-tracker loop). Vision seeds them.
@@ -459,13 +511,6 @@ function LightView() {
     }),
     [],
   )
-
-  // Debug hooks (the probe is consumed same-frame in the worklet via
-  // buffer.readSync - no async readback machinery remains).
-  useEffect(() => {
-    if (depthart == null) return
-    return undefined
-  }, [depthart])
 
   // Stable worklet: identity must only change when the captured pipeline
   // objects change, otherwise every React render re-serializes the closure
@@ -541,12 +586,23 @@ function LightView() {
           // longer runs natively. ---
           // Vision runs ONLY to (re)acquire: seed an ROI when a slot has
           // no valid tracking. Tracking frames are 100% GPU.
+          // Vision cadence: every 2nd frame while nothing is tracked
+          // (~66ms worst-case acquisition; every frame measured ~12ms idle
+          // callbacks - the ~9ms Vision join dominates), every 3rd frame
+          // while hunting for a second hand.
+          const trackedSlots =
+            (box.roi[0]!.valid ? 1 : 0) + (box.roi[1]!.valid ? 1 : 0)
           const runVision =
             controlsNow.handControl &&
-            (!box.roi[0]!.valid || !box.roi[1]!.valid) &&
-            box.frameCount % 3 === 0
+            trackedSlots < 2 &&
+            (trackedSlots === 0 ? box.frameCount % 2 === 0 : box.frameCount % 3 === 0)
+          // analyzeSync's CoreImage prep (~1ms) has exactly one consumer
+          // left - Vision hand acquisition - so skip it entirely on
+          // tracking frames.
           const tSync0 = performance.now()
-          const depth = nitro.analyzeSync(frame, rotationDeg, runVision, false)
+          const depth = runVision
+            ? nitro.analyzeSync(frame, rotationDeg, true, false)
+            : null
           const tSync = performance.now() - tSync0
           const tEnc0 = performance.now()
 
@@ -554,10 +610,114 @@ function LightView() {
           // TypeGPU dispatch recording measured ~6.5ms/frame in Hermes for
           // ~270 dispatches; raw handles pre-unwrapped at init are a
           // fraction of that. ---
-          const infEncoder = device.createCommandEncoder()
-          const infPass = infEncoder.beginComputePass()
+          // With profiling on, the work is bracketed into separate compute
+          // passes per stage (Dawn's Metal compute encoders are SERIAL, so
+          // every dispatch is a barrier already - pass boundaries add only
+          // the counter samples).
+          const prof = pipeline.profile
+          const tw = (slot: number) =>
+            prof != null
+              ? {
+                  timestampWrites: {
+                    querySet: prof.querySet,
+                    beginningOfPassWriteIndex: slot * 2,
+                    endOfPassWriteIndex: slot * 2 + 1,
+                  },
+                }
+              : undefined
+          // ============ SUBMISSION 1: hands + probe (the ONLY GPU work the
+          // CPU waits for this frame). The probe reads the PREVIOUS frame's
+          // disparity/range - queue order guarantees it samples them before
+          // submission 2 overwrites them. Landmarks stay same-frame; only
+          // the light's depth is one camera interval stale (EMA'd anyway).
+          const handEncoder = device.createCommandEncoder()
 
-          // 1. camera -> normalized [1,3,448,448] input tensor. The external
+          // GPU hand tracking: for each slot with a valid ROI, sample the
+          // rotated ROI into the landmark model's input and run its graph
+          // (63 fused dispatches). The depth probe then reads the landmark buffers ON
+          // GPU - everything chains inside this one submission.
+          const ROI_TOTAL = 224 * 224
+          for (let slot = 0; slot < 2; slot++) {
+            const roi = box.roi[slot]!
+            const handPass = handEncoder.beginComputePass(tw(8 + slot))
+            if (roi.valid) {
+              const inst = depthart.hands.instances[slot]!
+              inst.roiParams.write({
+                center: d.vec2f(roi.cx, roi.cy),
+                // Square in WORLD units: crop uv is 4:3 anamorphic, and the
+                // landmark model wants undistorted crops - a uv-square ROI
+                // stretched every hand 33% horizontally.
+                size: d.vec2f(roi.s / DISPLAY_ASPECT, roi.s),
+                rotation: d.vec2f(roi.rc, roi.rs),
+                cropScale: d.vec2f(cropW, cropH),
+                cropOffset: d.vec2f(cropOffX, cropOffY),
+                outputSize: d.vec2u(224, 224),
+                total: ROI_TOTAL,
+              })
+              const roiBindGroup = device.createBindGroup({
+                layout: depthart.hands.roiLayoutRaw,
+                entries: [
+                  { binding: 0, resource: { buffer: inst.roiParamsRaw } },
+                  { binding: 1, resource: externalTexture },
+                  { binding: 2, resource: depthart.preprocess.samplerRaw },
+                  { binding: 3, resource: { buffer: inst.inputRaw } },
+                ],
+              })
+              handPass.setPipeline(depthart.hands.roiPipelineRaw)
+              handPass.setBindGroup(0, roiBindGroup)
+              handPass.dispatchWorkgroups(Math.ceil(ROI_TOTAL / 64))
+              handPass.executeDispatchList(inst.list)
+            }
+            handPass.end()
+          }
+          depthart.hands.probeParams.write({
+            outputSize: d.vec2u(depthart.depthW, depthart.depthH),
+            present: d.vec2u(box.roi[0]!.valid ? 1 : 0, box.roi[1]!.valid ? 1 : 0),
+            roi1Center: d.vec2f(box.roi[0]!.cx, box.roi[0]!.cy),
+            roi1Size: d.vec2f(box.roi[0]!.s / DISPLAY_ASPECT, box.roi[0]!.s),
+            roi1Rot: d.vec2f(box.roi[0]!.rc, box.roi[0]!.rs),
+            roi2Center: d.vec2f(box.roi[1]!.cx, box.roi[1]!.cy),
+            roi2Size: d.vec2f(box.roi[1]!.s / DISPLAY_ASPECT, box.roi[1]!.s),
+            roi2Rot: d.vec2f(box.roi[1]!.rc, box.roi[1]!.rs),
+          })
+          const probePass = handEncoder.beginComputePass(tw(10))
+          probePass.setPipeline(depthart.hands.probePipelineRaw)
+          probePass.setBindGroup(0, depthart.hands.probeBindGroupRaw)
+          probePass.dispatchWorkgroups(1)
+          probePass.end()
+          handEncoder.copyBufferToBuffer(
+            depthart.hands.instances[0]!.outputRaw, 0, depthart.staging, 0, 512,
+          )
+          handEncoder.copyBufferToBuffer(
+            depthart.hands.instances[1]!.outputRaw, 0, depthart.staging, 512, 512,
+          )
+          handEncoder.copyBufferToBuffer(
+            depthart.hands.probeResultRaw, 0, depthart.staging, 1024, 16,
+          )
+          if (prof != null) {
+            // Hand/probe slots (8-10, queries 16-21) are fresh; everything
+            // else (preprocess/model/range 0-15, JBU 22-23, relight 24-25)
+            // was written by LAST frame's later submissions - resolving
+            // here reads those one frame late, which the EMA absorbs.
+            handEncoder.resolveQuerySet(prof.querySet, 0, 16, prof.resolveBuffer, 0)
+            handEncoder.resolveQuerySet(prof.querySet, 16, 10, prof.resolveBuffer, 256)
+            handEncoder.copyBufferToBuffer(
+              prof.resolveBuffer, 0, depthart.staging, QUERY_STAGING_OFFSET, 128,
+            )
+            handEncoder.copyBufferToBuffer(
+              prof.resolveBuffer, 256, depthart.staging, QUERY_STAGING_OFFSET + 128, 80,
+            )
+          }
+          // SUBMIT #1: hands + probe start on the GPU NOW.
+          device.queue.submit([handEncoder.finish()])
+
+          // ============ SUBMISSION 2 (fire-and-forget, encoded while the
+          // GPU runs the hand graphs): depth preprocess + model + range +
+          // JBU + surface. Nothing here is read back - the CPU never waits
+          // for the depth model again.
+          const mEncoder = device.createCommandEncoder()
+
+          // camera -> normalized [1,3,448,448] input tensor. The external
           // texture import already BAKES the display rotation into uv space
           // (that is what keeps the camera view upright), so the transform
           // must NOT rotate again - it is a pure center-crop scale that
@@ -577,93 +737,84 @@ function LightView() {
               { binding: 1, resource: externalTexture },
               { binding: 2, resource: depthart.preprocess.samplerRaw },
               { binding: 3, resource: { buffer: depthart.preprocess.outputRaw } },
+              { binding: 4, resource: { buffer: depthart.preprocess.lumaRaw } },
             ],
           })
-          infPass.setPipeline(depthart.preprocess.pipelineRaw)
-          infPass.setBindGroup(0, preBindGroup)
-          infPass.dispatchWorkgroups(Math.ceil(depthart.preprocess.total / 64))
+          const prePass = mEncoder.beginComputePass(tw(0))
+          prePass.setPipeline(depthart.preprocess.pipelineRaw)
+          prePass.setBindGroup(0, preBindGroup)
+          prePass.dispatchWorkgroups(Math.ceil(depthart.preprocess.total / 64))
+          prePass.end()
 
-          // 2. the model: ~260 prepared dispatches, all inside this pass.
-          for (const item of depthart.dispatches) {
-            infPass.setPipeline(item.pipeline)
-            infPass.setBindGroup(0, item.bindGroup)
-            infPass.dispatchWorkgroups(item.x, item.y, item.z)
+          // the model: ~266 prepared dispatches as prebuilt native lists,
+          // one timed bucket per list.
+          for (let bucket = 0; bucket < depthart.modelBucketLists.length; bucket++) {
+            const modelPass = mEncoder.beginComputePass(
+              tw(1 + Math.min(bucket, PROFILE_MODEL_BUCKETS - 1)),
+            )
+            modelPass.executeDispatchList(depthart.modelBucketLists[bucket]!)
+            modelPass.end()
           }
 
-          // 3. GPU 2-98% disparity range (histogram; writes the vec2f the
+          // GPU 2-98% disparity range (histogram; writes the vec2f the
           // JBU normalization reads - no CPU round-trip).
-          for (const item of depthart.range) {
-            infPass.setPipeline(item.pipeline)
-            infPass.setBindGroup(0, item.bindGroup)
-            infPass.dispatchWorkgroups(item.x, item.y, item.z)
-          }
+          const rangePass = mEncoder.beginComputePass(tw(7))
+          rangePass.executeDispatchList(depthart.rangeList)
+          rangePass.end()
 
-          // 4. GPU hand tracking: for each slot with a valid ROI, sample
-          // the rotated ROI into the landmark model's input and run its
-          // ~290 dispatches. The depth probe then reads the landmark
-          // buffers ON GPU - everything chains inside this one submission.
-          const ROI_TOTAL = 224 * 224
-          for (let slot = 0; slot < 2; slot++) {
-            const roi = box.roi[slot]!
-            if (!roi.valid) continue
-            const inst = depthart.hands.instances[slot]!
-            inst.roiParams.write({
-              center: d.vec2f(roi.cx, roi.cy),
-              // Square in WORLD units: crop uv is 4:3 anamorphic, and the
-              // landmark model wants undistorted crops - a uv-square ROI
-              // stretched every hand 33% horizontally.
-              size: d.vec2f(roi.s / DISPLAY_ASPECT, roi.s),
-              rotation: d.vec2f(roi.rc, roi.rs),
-              cropScale: d.vec2f(cropW, cropH),
-              cropOffset: d.vec2f(cropOffX, cropOffY),
-              outputSize: d.vec2u(224, 224),
-              total: ROI_TOTAL,
-            })
-            const roiBindGroup = device.createBindGroup({
-              layout: depthart.hands.roiLayoutRaw,
-              entries: [
-                { binding: 0, resource: { buffer: inst.roiParamsRaw } },
-                { binding: 1, resource: externalTexture },
-                { binding: 2, resource: depthart.preprocess.samplerRaw },
-                { binding: 3, resource: { buffer: inst.inputRaw } },
-              ],
-            })
-            infPass.setPipeline(depthart.hands.roiPipelineRaw)
-            infPass.setBindGroup(0, roiBindGroup)
-            infPass.dispatchWorkgroups(Math.ceil(ROI_TOTAL / 64))
-            for (const item of inst.dispatches) {
-              infPass.setPipeline(item.pipeline)
-              infPass.setBindGroup(0, item.bindGroup)
-              infPass.dispatchWorkgroups(item.x, item.y, item.z)
-            }
-          }
-          depthart.hands.probeParams.write({
-            outputSize: d.vec2u(depthart.depthW, depthart.depthH),
-            present: d.vec2u(box.roi[0]!.valid ? 1 : 0, box.roi[1]!.valid ? 1 : 0),
-            roi1Center: d.vec2f(box.roi[0]!.cx, box.roi[0]!.cy),
-            roi1Size: d.vec2f(box.roi[0]!.s / DISPLAY_ASPECT, box.roi[0]!.s),
-            roi1Rot: d.vec2f(box.roi[0]!.rc, box.roi[0]!.rs),
-            roi2Center: d.vec2f(box.roi[1]!.cx, box.roi[1]!.cy),
-            roi2Size: d.vec2f(box.roi[1]!.s / DISPLAY_ASPECT, box.roi[1]!.s),
-            roi2Rot: d.vec2f(box.roi[1]!.rc, box.roi[1]!.rs),
+          // JBU + lighting field, straight after the model in the same
+          // submission - they read this frame's fresh disparity.
+          const reset = box.depthEverRun ? 0 : 1
+          box.depthEverRun = true
+          const computeParams = new ArrayBuffer(48)
+          const cpU32 = new Uint32Array(computeParams)
+          const cpF32 = new Float32Array(computeParams)
+          cpU32[0] = pipeline.fieldW
+          cpU32[1] = pipeline.fieldH
+          cpU32[2] = reset
+          cpU32[3] = mirrored ? 1 : 0
+          cpF32[4] = depthart.depthW
+          cpF32[5] = depthart.depthH
+          cpF32[6] = cropW
+          cpF32[7] = cropH
+          cpF32[8] = cropOffX
+          cpF32[9] = cropOffY
+          device.queue.writeBuffer(pipeline.computeParamsBuffer, 0, computeParams)
+
+          const depthBindGroup = device.createBindGroup({
+            layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
+              { binding: 1, resource: { buffer: depthart.disparityRawBuffer } },
+              { binding: 2, resource: { buffer: pipeline.historyBuffer } },
+              { binding: 3, resource: pipeline.sampler },
+              { binding: 4, resource: externalTexture },
+              { binding: 5, resource: { buffer: depthart.rangeRawBuffer } },
+              { binding: 6, resource: { buffer: depthart.preprocess.lumaRaw } },
+            ],
           })
-          infPass.setPipeline(depthart.hands.probePipelineRaw)
-          infPass.setBindGroup(0, depthart.hands.probeBindGroupRaw)
-          infPass.dispatchWorkgroups(1)
-          infPass.end()
-          infEncoder.copyBufferToBuffer(
-            depthart.hands.instances[0]!.outputRaw, 0, depthart.staging, 0, 512,
+          const fieldPass = mEncoder.beginComputePass(tw(11))
+          fieldPass.setPipeline(pipeline.depthPreparePipeline)
+          fieldPass.setBindGroup(0, depthBindGroup)
+          fieldPass.dispatchWorkgroups(Math.ceil((pipeline.fieldW * pipeline.fieldH) / 64))
+          fieldPass.setPipeline(pipeline.surfacePipeline)
+          fieldPass.setBindGroup(0, pipeline.surfaceBindGroup)
+          fieldPass.dispatchWorkgroups(
+            Math.ceil(pipeline.fieldW / 8),
+            Math.ceil(pipeline.fieldH / 8),
           )
-          infEncoder.copyBufferToBuffer(
-            depthart.hands.instances[1]!.outputRaw, 0, depthart.staging, 512, 512,
-          )
-          infEncoder.copyBufferToBuffer(
-            depthart.hands.probeResultRaw, 0, depthart.staging, 1024, 16,
-          )
-          // SUBMIT #1: depth + hands + probe start on the GPU NOW.
-          device.queue.submit([infEncoder.finish()])
+          fieldPass.end()
+
+          // SUBMIT #2: the depth/field chain queues behind the hands.
+          device.queue.submit([mEncoder.finish()])
+          box.tEncCpu = box.tEncCpu * 0.9 + (performance.now() - tEnc0) * 0.1
 
           // Acquisition only: join Vision and seed ROIs for invalid slots.
+          // The seed must look like the ROI the landmark model was trained
+          // on: centered on the HAND (the middle MCP - the hand spans wrist
+          // to fingertips, ~2 palm-lengths, so the MCP is its center) and
+          // ROTATED palm-up. The old unrotated fingertip-centered seeds
+          // lost sideways hands instantly (presence 0.6 -> 0.03).
           if (runVision) {
             const tWait0 = performance.now()
             nitro.waitForHands()
@@ -671,12 +822,18 @@ function LightView() {
             const vision = nitro.getHandResult()
             const candidates = [vision.hand1, vision.hand2]
             for (const cand of candidates) {
-              if (!cand.tracked || cand.confidence < 0.4) continue
+              if (!cand.tracked || cand.confidence < 0.35) continue
+              // Palm axis in WORLD units (uv x scaled by the display
+              // aspect), same convention the GPU tracker predicts with.
+              const vx = (cand.mcpX - cand.wristX) * DISPLAY_ASPECT
+              const vy = cand.mcpY - cand.wristY
+              const worldHandSize = Math.max(Math.hypot(vx, vy), 1e-4)
+              const angle = Math.atan2(vx, -vy)
               // Skip hands already covered by a tracking slot.
               let taken = false
               for (let slot = 0; slot < 2; slot++) {
                 const roi = box.roi[slot]!
-                if (roi.valid && Math.hypot(roi.cx - cand.midX, roi.cy - cand.midY) < 0.22) {
+                if (roi.valid && Math.hypot(roi.cx - cand.mcpX, roi.cy - cand.mcpY) < 0.22) {
                   taken = true
                 }
               }
@@ -684,11 +841,11 @@ function LightView() {
               for (let slot = 0; slot < 2; slot++) {
                 const roi = box.roi[slot]!
                 if (!roi.valid) {
-                  roi.cx = cand.midX
-                  roi.cy = cand.midY
-                  roi.s = Math.min(Math.max(cand.handSize * 3.2, 0.16), 0.85)
-                  roi.rc = 1
-                  roi.rs = 0
+                  roi.cx = cand.mcpX
+                  roi.cy = cand.mcpY
+                  roi.s = Math.min(Math.max(worldHandSize * 3.2, 0.16), 0.9)
+                  roi.rc = Math.cos(angle)
+                  roi.rs = Math.sin(angle)
                   roi.valid = true
                   roi.missing = 0
                   roi.fresh = true
@@ -701,12 +858,25 @@ function LightView() {
           // ONE synchronous readback for everything the CPU needs this
           // frame: both hands' landmarks + the depth probe (readSync - our
           // rnwgpu extension - blocks until submit #1 drains).
+          const tRead0 = performance.now()
           const stagingBytes = (
             depthart.staging as unknown as { readSync(): ArrayBuffer }
           ).readSync()
+          box.tRead = box.tRead * 0.9 + (performance.now() - tRead0) * 0.1
           const sf = new Float32Array(stagingBytes)
           const gd = { h1: sf[256]!, h2: sf[257]!, low: sf[258]!, high: sf[259]! }
 
+          if (prof != null && box.frameCount > 1) {
+            // 26 u64 timestamps as u32 pairs (Hermes-safe, no BigInt):
+            // 13 slots of [begin, end] nanosecond stamps.
+            const q = new Uint32Array(stagingBytes, QUERY_STAGING_OFFSET, 52)
+            for (let slot = 0; slot < PROFILE_SLOTS; slot++) {
+              const begin = q[slot * 4]! + q[slot * 4 + 1]! * 4294967296
+              const end = q[slot * 4 + 2]! + q[slot * 4 + 3]! * 4294967296
+              const ms = Math.max(0, (end - begin) / 1e6)
+              box.gpuT[slot] = box.gpuT[slot]! * 0.9 + ms * 0.1
+            }
+          }
           // Parse landmarks per slot -> TrackedHand-shaped objects in crop
           // space, and predict next frame's ROI from this frame's skeleton.
           const emptyHand = {
@@ -724,9 +894,13 @@ function LightView() {
             }
             const base = slot * 128
             const presence = 1 / (1 + Math.exp(-sf[base + 126]!))
-            if (presence < 0.4) {
+            if (presence < 0.35) {
+              // Hysteresis: survive ~5 frames of blur/occlusion before
+              // giving the slot back to Vision, widening the crop a little
+              // each miss so a fast-moving hand gets re-caught.
               roi.missing += 1
-              if (roi.missing >= 3) roi.valid = false
+              roi.s = Math.min(roi.s * 1.15, 0.9)
+              if (roi.missing >= 5) roi.valid = false
               continue
             }
             roi.missing = 0
@@ -800,50 +974,6 @@ function LightView() {
             }
           }
           const tEnc = performance.now() - tEnc0
-
-          // The lighting passes get their own raw encoder (third submission).
-          const encoder = device.createCommandEncoder()
-
-          // --- JBU + lighting field, every frame ---
-          const reset = box.depthEverRun ? 0 : 1
-          box.depthEverRun = true
-          const computeParams = new ArrayBuffer(48)
-          const cpU32 = new Uint32Array(computeParams)
-          const cpF32 = new Float32Array(computeParams)
-          cpU32[0] = pipeline.fieldW
-          cpU32[1] = pipeline.fieldH
-          cpU32[2] = reset
-          cpU32[3] = mirrored ? 1 : 0
-          cpF32[4] = depthart.depthW
-          cpF32[5] = depthart.depthH
-          cpF32[6] = cropW
-          cpF32[7] = cropH
-          cpF32[8] = cropOffX
-          cpF32[9] = cropOffY
-          device.queue.writeBuffer(pipeline.computeParamsBuffer, 0, computeParams)
-
-          const depthBindGroup = device.createBindGroup({
-            layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
-            entries: [
-              { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
-              { binding: 1, resource: { buffer: depthart.disparityRawBuffer } },
-              { binding: 2, resource: { buffer: pipeline.historyBuffer } },
-              { binding: 3, resource: pipeline.sampler },
-              { binding: 4, resource: externalTexture },
-              { binding: 5, resource: { buffer: depthart.rangeRawBuffer } },
-            ],
-          })
-          const compute = encoder.beginComputePass()
-          compute.setPipeline(pipeline.depthPreparePipeline)
-          compute.setBindGroup(0, depthBindGroup)
-          compute.dispatchWorkgroups(Math.ceil((pipeline.fieldW * pipeline.fieldH) / 64))
-          compute.setPipeline(pipeline.surfacePipeline)
-          compute.setBindGroup(0, pipeline.surfaceBindGroup)
-          compute.dispatchWorkgroups(
-            Math.ceil(pipeline.fieldW / 8),
-            Math.ceil(pipeline.fieldH / 8),
-          )
-          compute.end()
 
           // --- hand interaction ---
           const prevLightX = box.lightX
@@ -1122,6 +1252,10 @@ function LightView() {
           rpF32[21] = box.bulbScale
           device.queue.writeBuffer(pipeline.relightParamsBuffer, 0, relightParams)
 
+          // ============ SUBMISSION 3: the relight draw alone - the only
+          // pass that needs the light position computed from this frame's
+          // landmark parse.
+          const encoder = device.createCommandEncoder()
           const bindGroup = device.createBindGroup({
             layout: pipeline.relightPipeline.getBindGroupLayout(0),
             entries: [
@@ -1140,6 +1274,15 @@ function LightView() {
                 storeOp: 'store',
               },
             ],
+            ...(prof != null
+              ? {
+                  timestampWrites: {
+                    querySet: prof.querySet,
+                    beginningOfPassWriteIndex: 24,
+                    endOfPassWriteIndex: 25,
+                  },
+                }
+              : {}),
           })
           pass.setPipeline(pipeline.relightPipeline)
           pass.setBindGroup(0, bindGroup)
@@ -1163,11 +1306,20 @@ function LightView() {
           }
           box.lastFrameTime = now
           if (box.frameCount % 150 === 0) {
+            const g = box.gpuT
+            const modelMs = g[1]! + g[2]! + g[3]! + g[4]! + g[5]! + g[6]!
+            console.log(
+              `[LightDemo] GPU pre=${g[0]!.toFixed(2)} ` +
+                `model=${modelMs.toFixed(2)}[${g[1]!.toFixed(2)},${g[2]!.toFixed(2)},${g[3]!.toFixed(2)},${g[4]!.toFixed(2)},${g[5]!.toFixed(2)},${g[6]!.toFixed(2)}] ` +
+                `range=${g[7]!.toFixed(2)} h1=${g[8]!.toFixed(2)} h2=${g[9]!.toFixed(2)} ` +
+                `probe=${g[10]!.toFixed(2)} jbu=${g[11]!.toFixed(2)} relight=${g[12]!.toFixed(2)} ` +
+                `| encCpu=${box.tEncCpu.toFixed(1)} read=${box.tRead.toFixed(1)}`,
+            )
             console.log(
               `[LightDemo] #${box.frameCount} ${box.fps.toFixed(0)}fps ` +
                 `render=${(now - renderStart).toFixed(1)}ms ` +
                 `sync=${box.tSync.toFixed(1)} enc=${box.tEnc.toFixed(1)} wait=${box.tWait.toFixed(1)} sub=${box.tSub.toFixed(1)} ` +
-                `depth#${depth.seq}=${depth.inferenceTimeMs.toFixed(0)}ms ` +
+                `depth#${depth?.seq ?? -1}=${(depth?.inferenceTimeMs ?? 0).toFixed(0)}ms ` +
                 `roi=[${box.roi[0]!.valid ? 'T' : '.'}${box.roi[1]!.valid ? 'T' : '.'}] ` +
                 `hands=${(hand.hand1.tracked ? 1 : 0) + (hand.hand2.tracked ? 1 : 0)} ` +
                 `pinch=${hand.hand1.pinchRatio.toFixed(2)} ` +
@@ -1185,7 +1337,7 @@ function LightView() {
               frameCount: box.frameCount,
               fps: box.fps,
               renderTimeMs: now - renderStart,
-              depthTimeMs: depth.inferenceTimeMs,
+              depthTimeMs: depth?.inferenceTimeMs ?? 0,
               handTimeMs: 0,
               frameWidth: frame.width,
               frameHeight: frame.height,
@@ -1198,7 +1350,7 @@ function LightView() {
               handTracked: hand.hand1.tracked || hand.hand2.tracked,
               pinchRatio: Math.min(hand.hand1.pinchRatio, hand.hand2.pinchRatio),
               grabbed: box.grabbed,
-              depthSeq: depth.seq,
+              depthSeq: depth?.seq ?? -1,
               handSeq: box.frameCount,
             })
           }

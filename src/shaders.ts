@@ -123,10 +123,18 @@ ${COMPUTE_PARAMS}
 @group(0) @binding(3) var disparitySampler: sampler;
 @group(0) @binding(4) var cameraTex: texture_external;
 @group(0) @binding(5) var<storage, read> disparityRange: vec2f;
+// Model-grid luma written by the depth preprocess pass - the JBU guide at
+// tap positions, WITHOUT 16 external-texture (YUV-convert) samples/texel.
+@group(0) @binding(6) var<storage, read> modelLuma: array<f32>;
 
 fn disparityAt(coord: vec2f) -> f32 {
   let c = vec2i(clamp(coord, vec2f(0.0), params.modelSize - 1.0));
   return disparity[u32(c.y) * u32(params.modelSize.x) + u32(c.x)].x;
+}
+
+fn modelLumaAt(coord: vec2f) -> f32 {
+  let c = vec2i(clamp(coord, vec2f(0.0), params.modelSize - 1.0));
+  return modelLuma[u32(c.y) * u32(params.modelSize.x) + u32(c.x)];
 }
 
 fn cameraLuma(uv: vec2f) -> f32 {
@@ -157,11 +165,10 @@ fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
   for (var dy = -1; dy <= 2; dy++) {
     for (var dx = -1; dx <= 2; dx++) {
       let tap = baseTexel + vec2f(f32(dx), f32(dy));
-      let tapUv = (tap + vec2f(0.5)) / params.modelSize;
       let disp = disparityAt(tap);
       let toTap = mp - tap;
       let spatial = exp(-dot(toTap, toTap) * JBU_SPATIAL);
-      let lumaDelta = cameraLuma(tapUv) - centerLuma;
+      let lumaDelta = modelLumaAt(tap) - centerLuma;
       let similarity = exp(-lumaDelta * lumaDelta * JBU_RANGE) + JBU_FLOOR;
       let w = spatial * similarity;
       accum += disp * w;

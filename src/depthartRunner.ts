@@ -175,6 +175,9 @@ export interface HandGraphInstance {
   // Per-slot dedicated graph: own arena + weights (2.4MB, trivial), so two
   // hands run independently in the same submission.
   dispatches: readonly RawDispatch[]
+  // The same dispatches as a prebuilt native list: one JSI call per frame
+  // instead of 3 per dispatch (~290 x 3 saved per hand).
+  list: GPUDispatchList
   roiParams: TgpuUniform<typeof RoiParams>
   roiParamsRaw: GPUBuffer
   inputRaw: GPUBuffer
@@ -186,6 +189,10 @@ export interface DepthartRunner {
   depthW: number
   depthH: number
   dispatches: readonly RawDispatch[]
+  // The model dispatches pre-split into equal native lists so the frame
+  // loop keeps per-bucket GPU timestamps while paying ~1 JSI call each.
+  modelBucketLists: readonly GPUDispatchList[]
+  rangeList: GPUDispatchList
   preprocess: {
     pipelineRaw: GPUComputePipeline
     layoutRaw: GPUBindGroupLayout
@@ -193,6 +200,9 @@ export interface DepthartRunner {
     paramsRaw: GPUBuffer
     samplerRaw: GPUSampler
     outputRaw: GPUBuffer
+    // Raw model-grid luma written alongside the input tensor; the JBU
+    // guide taps read this instead of re-sampling the camera texture.
+    lumaRaw: GPUBuffer
     total: number
   }
   range: readonly RawDispatch[]
@@ -215,11 +225,14 @@ export interface DepthartRunner {
 }
 
 const HAND_LM_BYTES = 512
+// [1040, 1248): GPU timestamp deltas (26 u64 query slots resolved+copied
+// here when 'timestamp-query' is available - see PROFILE in LightScreen).
 export const STAGING_LAYOUT = {
   hand1: 0,
   hand2: HAND_LM_BYTES,
   probe: HAND_LM_BYTES * 2,
-  total: HAND_LM_BYTES * 2 + 16,
+  queries: HAND_LM_BYTES * 2 + 16,
+  total: HAND_LM_BYTES * 2 + 16 + 26 * 8,
 }
 
 async function fetchBundle(moduleId: number): Promise<ReturnType<typeof parseDepthBundle>> {
@@ -253,6 +266,18 @@ function unwrapDispatches(
   }))
 }
 
+function buildDispatchList(device: GPUDevice, items: readonly RawDispatch[]): GPUDispatchList {
+  return device.createDispatchList(
+    items.map((item) => ({
+      pipeline: item.pipeline,
+      bindGroup: item.bindGroup,
+      x: item.x,
+      y: item.y,
+      z: item.z,
+    })),
+  )
+}
+
 export async function createDepthartRunner(device: GPUDevice): Promise<DepthartRunner> {
   const root = tgpu.initFromDevice({ device })
 
@@ -261,8 +286,11 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
     require('../assets/depthart-relative-s-448-balanced.depthart'),
   )
   const handBundle = await fetchBundle(
+    // The FULL landmark variant: noticeably better landmarks/presence than
+    // lite, and since the native-op fusion it is only 63 dispatches
+    // (~2ms/hand) - lite quality was the tracker's weakest link.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    require('../assets/hand-landmark-lite-224.depthart'),
+    require('../assets/hand-landmark-full-224.depthart'),
   )
 
   const depthInput = depthBundle.tensorById.get(depthBundle.input.tensorId)!
@@ -274,6 +302,9 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
 
   const preParams = root.createUniform(FrameParams)
   const preSampler = root.createSampler({ magFilter: 'nearest', minFilter: 'nearest' })
+  const preLuma = root
+    .createBuffer(d.arrayOf(d.f32, inputWidth * inputHeight))
+    .$usage('storage')
   const prePipeline = root.createComputePipeline({ compute: depthFramePreprocessKernel })
 
   const rangeBuffer = root.createBuffer(d.vec2f).$usage('storage')
@@ -330,11 +361,28 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
     ],
   })
 
+  const depthDispatches = unwrapDispatches(root, depth.prepared)
+  const hand1Dispatches = unwrapDispatches(root, hand1.prepared)
+  const hand2Dispatches = unwrapDispatches(root, hand2.prepared)
+  const MODEL_BUCKETS = 6
+  const perBucket = Math.ceil(depthDispatches.length / MODEL_BUCKETS)
+  const modelBucketLists: GPUDispatchList[] = []
+  for (let bucket = 0; bucket < MODEL_BUCKETS; bucket++) {
+    modelBucketLists.push(
+      buildDispatchList(
+        device,
+        depthDispatches.slice(bucket * perBucket, (bucket + 1) * perBucket),
+      ),
+    )
+  }
+
   return {
     root,
     depthW: inputWidth,
     depthH: inputHeight,
-    dispatches: unwrapDispatches(root, depth.prepared),
+    dispatches: depthDispatches,
+    modelBucketLists,
+    rangeList: buildDispatchList(device, rawRange),
     preprocess: {
       pipelineRaw: root.unwrap(prePipeline),
       layoutRaw: root.unwrap(preprocessLayout),
@@ -342,6 +390,7 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
       paramsRaw: root.unwrap(preParams.buffer),
       samplerRaw: root.unwrap(preSampler),
       outputRaw: depth.arena.inputBuffer.buffer,
+      lumaRaw: preLuma.buffer,
       total: inputWidth * inputHeight,
     },
     range: rawRange,
@@ -350,14 +399,16 @@ export async function createDepthartRunner(device: GPUDevice): Promise<DepthartR
       roiLayoutRaw: root.unwrap(roiLayout),
       instances: [
         {
-          dispatches: unwrapDispatches(root, hand1.prepared),
+          dispatches: hand1Dispatches,
+          list: buildDispatchList(device, hand1Dispatches),
           roiParams: roi1Params,
           roiParamsRaw: root.unwrap(roi1Params.buffer),
           inputRaw: hand1.arena.inputBuffer.buffer,
           outputRaw: hand1.arena.outputBuffer.buffer,
         },
         {
-          dispatches: unwrapDispatches(root, hand2.prepared),
+          dispatches: hand2Dispatches,
+          list: buildDispatchList(device, hand2Dispatches),
           roiParams: roi2Params,
           roiParamsRaw: root.unwrap(roi2Params.buffer),
           inputRaw: hand2.arena.inputBuffer.buffer,
