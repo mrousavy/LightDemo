@@ -12,7 +12,6 @@ import {
 import {
   Canvas,
   useCanvasRef,
-  type GPUSharedTextureMemory,
   type NativeCanvas,
   type RNCanvasContext,
 } from 'react-native-webgpu'
@@ -29,11 +28,18 @@ import {
   type LightPipeline,
   type LightStatus,
 } from 'light-native'
+import { d } from 'typegpu'
+import { createDepthartRunner, type DepthartRunner } from './depthartRunner'
 import { DEPTH_PREPARE_SHADER, RELIGHT_SHADER, SURFACE_SHADER } from './shaders'
 
 const REQUIRED_FEATURES: GPUFeatureName[] = [
   'rnwebgpu/native-texture' as GPUFeatureName,
   'dawn-multi-planar-formats' as GPUFeatureName,
+  // DepthART's fp16 'balanced' weight bundle runs in f16 compute.
+  'shader-f16' as GPUFeatureName,
+  // The frame worklet and the main thread (hand-probe readback) both submit
+  // to the device; this makes Dawn mutex it internally.
+  'implicit-device-synchronization' as GPUFeatureName,
 ]
 
 // Unified z-space, MUST match SURFACE_FAR_Z in shaders.ts: normalized
@@ -76,6 +82,10 @@ const DEFAULT_CONTROLS: LightControls = {
 }
 
 const MODE_NAMES = ['Relit', 'Camera', 'Depth', 'Normals']
+
+// The Insta360's sensor aspect: what the display shows and the depth model
+// covers (centered crop of the oriented frame).
+const DISPLAY_ASPECT = 4 / 3
 
 // Stable identities - inline literals would recreate the frame output /
 // reconfigure the session on every React render.
@@ -128,6 +138,7 @@ function LightView() {
   const ref = useCanvasRef()
   const window = useWindowDimensions()
   const [device, setDevice] = useState<GPUDevice | null>(null)
+  const [depthart, setDepthart] = useState<DepthartRunner | null>(null)
   const [nitro, setNitro] = useState<LightPipeline | null>(null)
   const [pipeline, setPipeline] = useState<PipelineState | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -179,9 +190,34 @@ function LightView() {
     }
   }, [])
 
+  // 2b. DepthART GPU inference (TypeGPU on the same Dawn device): the
+  // entire depth model runs as ~250 compute dispatches inside our frame
+  // encoder - no CoreML, no ANE, no CPU copies.
+  useEffect(() => {
+    if (device == null || depthart != null) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const start = performance.now()
+        const runner = await createDepthartRunner(device)
+        console.log(
+          `[LightDemo] depthart ready in ${(performance.now() - start).toFixed(0)}ms, ` +
+            `${runner.depthW}x${runner.depthH}, ${runner.dispatches.length} dispatches`,
+        )
+        if (!cancelled) setDepthart(runner)
+      } catch (e) {
+        console.log(`[LightDemo] depthart init FAILED: ${String(e)}`)
+        if (!cancelled) setError(`DepthART init: ${String(e)}`)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [device, depthart])
+
   // 3. WebGPU pipelines (device + canvas + depth size ready)
   useEffect(() => {
-    if (device == null || nitro == null || pipeline != null) return
+    if (device == null || nitro == null || depthart == null || pipeline != null) return
     const missing = REQUIRED_FEATURES.filter((f) => !device.features.has(f))
     if (missing.length > 0) {
       setError(`Device missing features: ${missing.join(', ')}`)
@@ -195,10 +231,13 @@ function LightView() {
     const format = navigator.gpu.getPreferredCanvasFormat()
     context.configure({ device, format, alphaMode: 'opaque' })
 
-    const depthW = nitro.depthWidth
-    const depthH = nitro.depthHeight
-    const fieldW = depthW * 3
-    const fieldH = depthH * 3
+    const depthW = depthart.depthW
+    const depthH = depthart.depthH
+    // The disparity grid is a 448x448 anamorphic squeeze of the full 4:3
+    // frame; the lighting field keeps the DISPLAY aspect so field texels
+    // stay square on screen.
+    const fieldW = 1344
+    const fieldH = 1008
     const fieldTexelCount = fieldW * fieldH
 
     const depthPrepareModule = device.createShaderModule({ code: DEPTH_PREPARE_SHADER })
@@ -265,7 +304,7 @@ function LightView() {
       fieldW,
       fieldH,
     })
-  }, [device, nitro, pipeline, ref])
+  }, [device, nitro, depthart, pipeline, ref])
 
   // 4. Push UI controls into the native store (worklet reads them per frame)
   useEffect(() => {
@@ -347,28 +386,30 @@ function LightView() {
   }, [])
 
   const devices = useCameraDevices()
-  // Never pick a Continuity Camera (iPhone). Prefer USB/external cameras,
-  // then the built-in front camera. A crashed UVC driver can leave a
-  // phantom "NULL Camera" device behind that fails every session config
-  // with AVFoundation -11800 '!obj' - never select it.
+  // USB/external ONLY. This machine grows odd virtual cameras (Continuity,
+  // a fridge-cam CMIO extension claiming to be a built-in wide angle, the
+  // phantom "NULL Camera" a crashed UVC driver leaves behind) - falling
+  // back to any of them produces an eternal frameless "Starting camera".
+  // useCameraDevices is reactive: when the real USB camera registers, it
+  // gets picked up automatically.
   const cameraDevice = useMemo(() => {
-    const real = devices.filter(
+    console.log(
+      `[LightDemo] cameras (${devices.length}): ` +
+        devices
+          .map((d) => `"${d.localizedName}" [${d.type}/${d.position}]`)
+          .join(', '),
+    )
+    const device = devices.find(
       (d) =>
+        d.type === 'external' &&
         !d.isContinuityCamera &&
-        d.type !== 'continuity' &&
         !d.localizedName.includes('NULL'),
     )
-    const device =
-      real.find((d) => d.type === 'external') ??
-      real.find((d) => d.position === 'front') ??
-      real.find((d) => d.position === 'back') ??
-      real[0]
-    if (device != null) {
-      console.log(
-        `[LightDemo] camera: "${device.localizedName}" type=${device.type} ` +
-          `position=${device.position} (${devices.length} devices total)`,
-      )
-    }
+    console.log(
+      device != null
+        ? `[LightDemo] camera: "${device.localizedName}"`
+        : '[LightDemo] camera: none - waiting for a USB camera to register',
+    )
     return device
   }, [devices])
 
@@ -403,15 +444,28 @@ function LightView() {
       velX: 0,
       velY: 0,
       lostFrames: 0,
-      // Cached zero-copy depth import, keyed by the IOSurface pointer. With
-      // CoreML output backings the pointer is stable, so the import and
-      // bind group happen once and only the access window is per-frame.
-      depthPtr: 0n as bigint,
-      depthMemory: null as GPUSharedTextureMemory | null,
-      depthTexture: null as GPUTexture | null,
+      depthEverRun: false,
+      tSync: 0,
+      tEnc: 0,
+      tSub: 0,
+      tWait: 0,
+      // GPU hand-tracking ROIs, one per slot: center/size/rotation in
+      // display-crop uv, predicted each frame from that frame's landmarks
+      // (MediaPipe's landmark-model-as-tracker loop). Vision seeds them.
+      roi: [
+        { cx: 0.5, cy: 0.5, s: 0.3, rc: 1, rs: 0, valid: false, missing: 0, fresh: false },
+        { cx: 0.5, cy: 0.5, s: 0.3, rc: 1, rs: 0, valid: false, missing: 0, fresh: false },
+      ],
     }),
     [],
   )
+
+  // Debug hooks (the probe is consumed same-frame in the worklet via
+  // buffer.readSync - no async readback machinery remains).
+  useEffect(() => {
+    if (depthart == null) return
+    return undefined
+  }, [depthart])
 
   // Stable worklet: identity must only change when the captured pipeline
   // objects change, otherwise every React render re-serializes the closure
@@ -419,7 +473,7 @@ function LightView() {
   const onFrame = useCallback(
     (frame: Frame) => {
       'worklet'
-      if (pipeline == null || device == null || nitro == null) {
+      if (pipeline == null || device == null || nitro == null || depthart == null) {
         frame.dispose()
         return
       }
@@ -459,17 +513,16 @@ function LightView() {
           const dispW = rotated ? videoFrame.height : videoFrame.width
           const dispH = rotated ? videoFrame.width : videoFrame.height
 
-          // Center-crop mapping from the model's aspect into the oriented
-          // camera frame - shared by the JBU depth upsample (no mirror) and
-          // the relight camera fetch (mirror applied in-shader).
-          const modelAspect = pipeline.depthW / pipeline.depthH
+          // The oriented camera frame is PORTRAIT 3:4 (the Insta360 delivers
+          // a rotated buffer); display and depth both use its centered 4:3
+          // landscape crop - the same region the old CoreML prep extracted.
           const frameAspect = dispW / dispH
           let cropW = 1
           let cropH = 1
-          if (frameAspect > modelAspect) {
-            cropW = modelAspect / frameAspect
+          if (frameAspect > DISPLAY_ASPECT) {
+            cropW = DISPLAY_ASPECT / frameAspect
           } else {
-            cropH = frameAspect / modelAspect
+            cropH = frameAspect / DISPLAY_ASPECT
           }
           const cropOffX = (1 - cropW) / 2
           const cropOffY = (1 - cropH) / 2
@@ -482,92 +535,321 @@ function LightView() {
             rotation: rotationDeg,
           })
 
-          const encoder = device.createCommandEncoder()
+          // --- hands: native Vision on the prepared buffer (its 4:3 crop
+          // of the 4:3 camera is the identity, so landmarks are full-frame
+          // uv - the same space as the GPU disparity grid). Depth itself no
+          // longer runs natively. ---
+          // Vision runs ONLY to (re)acquire: seed an ROI when a slot has
+          // no valid tracking. Tracking frames are 100% GPU.
+          const runVision =
+            controlsNow.handControl &&
+            (!box.roi[0]!.valid || !box.roi[1]!.valid) &&
+            box.frameCount % 3 === 0
+          const tSync0 = performance.now()
+          const depth = nitro.analyzeSync(frame, rotationDeg, runVision, false)
+          const tSync = performance.now() - tSync0
+          const tEnc0 = performance.now()
 
-          // --- depth + hands: fully synchronous, same-frame (async results
-          // lag the camera image; a stale depth map paints ghost trails
-          // behind fast-moving objects). The Frame is passed TYPED - the
-          // NativeBuffer pointer contract is only for react-native-webgpu,
-          // which has no VisionCamera dependency. ---
-          const depth = nitro.analyzeSync(frame, rotationDeg, controlsNow.handControl)
-          let reset = 0
-          let depthAccessed = false
-          if (depth.seq >= 0 && depth.seq !== box.lastDepthSeq && depth.surfacePointer !== 0n) {
-            box.lastDepthSeq = depth.seq
-            if (!box.rangeInitialized) {
-              box.rangeInitialized = true
-              box.rangeLow = depth.low
-              box.rangeHigh = depth.high
-              reset = 1
-            } else {
-              // RANGE_BLEND = 0.12 (TypeGPU demo)
-              box.rangeLow = box.rangeLow + (depth.low - box.rangeLow) * 0.12
-              box.rangeHigh = box.rangeHigh + (depth.high - box.rangeHigh) * 0.12
-            }
-            const computeParams = new ArrayBuffer(48)
-            const cpU32 = new Uint32Array(computeParams)
-            const cpF32 = new Float32Array(computeParams)
-            cpU32[0] = pipeline.fieldW
-            cpU32[1] = pipeline.fieldH
-            cpU32[2] = reset
-            cpU32[3] = mirrored ? 1 : 0
-            cpF32[4] = box.rangeLow
-            cpF32[5] = box.rangeHigh
-            cpF32[6] = cropW
-            cpF32[7] = cropH
-            cpF32[8] = cropOffX
-            cpF32[9] = cropOffY
-            device.queue.writeBuffer(pipeline.computeParamsBuffer, 0, computeParams)
+          // --- DepthART inference: everything raw WebGPU - the typed
+          // TypeGPU dispatch recording measured ~6.5ms/frame in Hermes for
+          // ~270 dispatches; raw handles pre-unwrapped at init are a
+          // fraction of that. ---
+          const infEncoder = device.createCommandEncoder()
+          const infPass = infEncoder.beginComputePass()
 
-            // Zero-copy: CoreML writes depth into ONE persistent IOSurface
-            // (outputBackings), imported here once and reused - only the
-            // begin/end access window is per-frame.
-            if (box.depthPtr !== depth.surfacePointer || box.depthTexture == null) {
-              box.depthTexture?.destroy()
-              const memory = device.importSharedTextureMemory({
-                handle: depth.surfacePointer,
-                label: 'depth-f16',
-              })
-              const texture = memory.createTexture()
-              box.depthMemory = memory
-              box.depthTexture = texture
-              box.depthPtr = depth.surfacePointer
-            }
-            // Per frame: the bind group holds the expiring external texture
-            // (the JBU guide image), so it cannot be cached.
-            const depthBindGroup = device.createBindGroup({
-              layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
+          // 1. camera -> normalized [1,3,448,448] input tensor. The external
+          // texture import already BAKES the display rotation into uv space
+          // (that is what keeps the camera view upright), so the transform
+          // must NOT rotate again - it is a pure center-crop scale that
+          // selects the same 4:3 region the display shows, squeezed
+          // anamorphically into the square model input.
+          depthart.preprocess.params.write({
+            uvTransform: d.mat2x2f(cropW, 0, 0, cropH),
+            outputSize: d.vec2u(depthart.depthW, depthart.depthH),
+            mirrorX: 0,
+            swapAxes: rotated ? 1 : 0,
+            total: depthart.preprocess.total,
+          })
+          const preBindGroup = device.createBindGroup({
+            layout: depthart.preprocess.layoutRaw,
+            entries: [
+              { binding: 0, resource: { buffer: depthart.preprocess.paramsRaw } },
+              { binding: 1, resource: externalTexture },
+              { binding: 2, resource: depthart.preprocess.samplerRaw },
+              { binding: 3, resource: { buffer: depthart.preprocess.outputRaw } },
+            ],
+          })
+          infPass.setPipeline(depthart.preprocess.pipelineRaw)
+          infPass.setBindGroup(0, preBindGroup)
+          infPass.dispatchWorkgroups(Math.ceil(depthart.preprocess.total / 64))
+
+          // 2. the model: ~260 prepared dispatches, all inside this pass.
+          for (const item of depthart.dispatches) {
+            infPass.setPipeline(item.pipeline)
+            infPass.setBindGroup(0, item.bindGroup)
+            infPass.dispatchWorkgroups(item.x, item.y, item.z)
+          }
+
+          // 3. GPU 2-98% disparity range (histogram; writes the vec2f the
+          // JBU normalization reads - no CPU round-trip).
+          for (const item of depthart.range) {
+            infPass.setPipeline(item.pipeline)
+            infPass.setBindGroup(0, item.bindGroup)
+            infPass.dispatchWorkgroups(item.x, item.y, item.z)
+          }
+
+          // 4. GPU hand tracking: for each slot with a valid ROI, sample
+          // the rotated ROI into the landmark model's input and run its
+          // ~290 dispatches. The depth probe then reads the landmark
+          // buffers ON GPU - everything chains inside this one submission.
+          const ROI_TOTAL = 224 * 224
+          for (let slot = 0; slot < 2; slot++) {
+            const roi = box.roi[slot]!
+            if (!roi.valid) continue
+            const inst = depthart.hands.instances[slot]!
+            inst.roiParams.write({
+              center: d.vec2f(roi.cx, roi.cy),
+              // Square in WORLD units: crop uv is 4:3 anamorphic, and the
+              // landmark model wants undistorted crops - a uv-square ROI
+              // stretched every hand 33% horizontally.
+              size: d.vec2f(roi.s / DISPLAY_ASPECT, roi.s),
+              rotation: d.vec2f(roi.rc, roi.rs),
+              cropScale: d.vec2f(cropW, cropH),
+              cropOffset: d.vec2f(cropOffX, cropOffY),
+              outputSize: d.vec2u(224, 224),
+              total: ROI_TOTAL,
+            })
+            const roiBindGroup = device.createBindGroup({
+              layout: depthart.hands.roiLayoutRaw,
               entries: [
-                { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
-                { binding: 1, resource: box.depthTexture!.createView() },
-                { binding: 2, resource: { buffer: pipeline.historyBuffer } },
-                { binding: 3, resource: pipeline.sampler },
-                { binding: 4, resource: externalTexture },
+                { binding: 0, resource: { buffer: inst.roiParamsRaw } },
+                { binding: 1, resource: externalTexture },
+                { binding: 2, resource: depthart.preprocess.samplerRaw },
+                { binding: 3, resource: { buffer: inst.inputRaw } },
               ],
             })
-            box.depthMemory!.beginAccess(box.depthTexture!, true)
-            depthAccessed = true
-
-            const compute = encoder.beginComputePass()
-            compute.setPipeline(pipeline.depthPreparePipeline)
-            compute.setBindGroup(0, depthBindGroup)
-            compute.dispatchWorkgroups(Math.ceil((pipeline.fieldW * pipeline.fieldH) / 64))
-            compute.setPipeline(pipeline.surfacePipeline)
-            compute.setBindGroup(0, pipeline.surfaceBindGroup)
-            compute.dispatchWorkgroups(
-              Math.ceil(pipeline.fieldW / 8),
-              Math.ceil(pipeline.fieldH / 8),
-            )
-            compute.end()
+            infPass.setPipeline(depthart.hands.roiPipelineRaw)
+            infPass.setBindGroup(0, roiBindGroup)
+            infPass.dispatchWorkgroups(Math.ceil(ROI_TOTAL / 64))
+            for (const item of inst.dispatches) {
+              infPass.setPipeline(item.pipeline)
+              infPass.setBindGroup(0, item.bindGroup)
+              infPass.dispatchWorkgroups(item.x, item.y, item.z)
+            }
           }
+          depthart.hands.probeParams.write({
+            outputSize: d.vec2u(depthart.depthW, depthart.depthH),
+            present: d.vec2u(box.roi[0]!.valid ? 1 : 0, box.roi[1]!.valid ? 1 : 0),
+            roi1Center: d.vec2f(box.roi[0]!.cx, box.roi[0]!.cy),
+            roi1Size: d.vec2f(box.roi[0]!.s / DISPLAY_ASPECT, box.roi[0]!.s),
+            roi1Rot: d.vec2f(box.roi[0]!.rc, box.roi[0]!.rs),
+            roi2Center: d.vec2f(box.roi[1]!.cx, box.roi[1]!.cy),
+            roi2Size: d.vec2f(box.roi[1]!.s / DISPLAY_ASPECT, box.roi[1]!.s),
+            roi2Rot: d.vec2f(box.roi[1]!.rc, box.roi[1]!.rs),
+          })
+          infPass.setPipeline(depthart.hands.probePipelineRaw)
+          infPass.setBindGroup(0, depthart.hands.probeBindGroupRaw)
+          infPass.dispatchWorkgroups(1)
+          infPass.end()
+          infEncoder.copyBufferToBuffer(
+            depthart.hands.instances[0]!.outputRaw, 0, depthart.staging, 0, 512,
+          )
+          infEncoder.copyBufferToBuffer(
+            depthart.hands.instances[1]!.outputRaw, 0, depthart.staging, 512, 512,
+          )
+          infEncoder.copyBufferToBuffer(
+            depthart.hands.probeResultRaw, 0, depthart.staging, 1024, 16,
+          )
+          // SUBMIT #1: depth + hands + probe start on the GPU NOW.
+          device.queue.submit([infEncoder.finish()])
+
+          // Acquisition only: join Vision and seed ROIs for invalid slots.
+          if (runVision) {
+            const tWait0 = performance.now()
+            nitro.waitForHands()
+            box.tWait = box.tWait * 0.9 + (performance.now() - tWait0) * 0.1
+            const vision = nitro.getHandResult()
+            const candidates = [vision.hand1, vision.hand2]
+            for (const cand of candidates) {
+              if (!cand.tracked || cand.confidence < 0.4) continue
+              // Skip hands already covered by a tracking slot.
+              let taken = false
+              for (let slot = 0; slot < 2; slot++) {
+                const roi = box.roi[slot]!
+                if (roi.valid && Math.hypot(roi.cx - cand.midX, roi.cy - cand.midY) < 0.22) {
+                  taken = true
+                }
+              }
+              if (taken) continue
+              for (let slot = 0; slot < 2; slot++) {
+                const roi = box.roi[slot]!
+                if (!roi.valid) {
+                  roi.cx = cand.midX
+                  roi.cy = cand.midY
+                  roi.s = Math.min(Math.max(cand.handSize * 3.2, 0.16), 0.85)
+                  roi.rc = 1
+                  roi.rs = 0
+                  roi.valid = true
+                  roi.missing = 0
+                  roi.fresh = true
+                  break
+                }
+              }
+            }
+          }
+
+          // ONE synchronous readback for everything the CPU needs this
+          // frame: both hands' landmarks + the depth probe (readSync - our
+          // rnwgpu extension - blocks until submit #1 drains).
+          const stagingBytes = (
+            depthart.staging as unknown as { readSync(): ArrayBuffer }
+          ).readSync()
+          const sf = new Float32Array(stagingBytes)
+          const gd = { h1: sf[256]!, h2: sf[257]!, low: sf[258]!, high: sf[259]! }
+
+          // Parse landmarks per slot -> TrackedHand-shaped objects in crop
+          // space, and predict next frame's ROI from this frame's skeleton.
+          const emptyHand = {
+            tracked: false, thumbX: 0, thumbY: 0, indexX: 0, indexY: 0,
+            midX: 0, midY: 0, pinchRatio: 1, handSize: 0, confidence: 0,
+            disparity: -1,
+          }
+          const slotHands = [emptyHand, emptyHand]
+          for (let slot = 0; slot < 2; slot++) {
+            const roi = box.roi[slot]!
+            if (!roi.valid || roi.fresh) {
+              // fresh = seeded this frame; its graph did not run yet.
+              roi.fresh = false
+              continue
+            }
+            const base = slot * 128
+            const presence = 1 / (1 + Math.exp(-sf[base + 126]!))
+            if (presence < 0.4) {
+              roi.missing += 1
+              if (roi.missing >= 3) roi.valid = false
+              continue
+            }
+            roi.missing = 0
+            const lmx = (i: number) => {
+              const px = sf[base + i * 3]! / 224 - 0.5
+              const py = sf[base + i * 3 + 1]! / 224 - 0.5
+              return roi.cx + ((px * roi.rc - py * roi.rs) * roi.s) / DISPLAY_ASPECT
+            }
+            const lmy = (i: number) => {
+              const px = sf[base + i * 3]! / 224 - 0.5
+              const py = sf[base + i * 3 + 1]! / 224 - 0.5
+              return roi.cy + (px * roi.rs + py * roi.rc) * roi.s
+            }
+            const wristX = lmx(0)
+            const wristY = lmy(0)
+            const thumbX = lmx(4)
+            const thumbY = lmy(4)
+            const indexX = lmx(8)
+            const indexY = lmy(8)
+            const mcpX = lmx(9)
+            const mcpY = lmy(9)
+            // Distances in WORLD units (uv x scaled by aspect) - pinch and
+            // hand size must not depend on the pinch direction.
+            const handSize = Math.max(
+              Math.hypot((mcpX - wristX) * DISPLAY_ASPECT, mcpY - wristY),
+              1e-4,
+            )
+            slotHands[slot] = {
+              tracked: true,
+              thumbX, thumbY, indexX, indexY,
+              midX: (thumbX + indexX) / 2,
+              midY: (thumbY + indexY) / 2,
+              pinchRatio:
+                Math.hypot((thumbX - indexX) * DISPLAY_ASPECT, thumbY - indexY) /
+                handSize,
+              handSize,
+              confidence: presence,
+              disparity: -1,
+            }
+            // Next-frame ROI: expanded landmark bbox, rotated hand-up.
+            let minX = 1, minY = 1, maxX = 0, maxY = 0
+            for (let i = 0; i < 21; i++) {
+              const x = lmx(i)
+              const y = lmy(i)
+              if (x < minX) minX = x
+              if (x > maxX) maxX = x
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
+            }
+            roi.cx = (minX + maxX) / 2
+            roi.cy = (minY + maxY) / 2
+            // World-unit extent, MediaPipe's own 2.6x expansion.
+            const extent = Math.max((maxX - minX) * DISPLAY_ASPECT, maxY - minY)
+            roi.s = Math.min(Math.max(extent * 2.6, 0.14), 0.9)
+            const vx = (mcpX - wristX) * DISPLAY_ASPECT
+            const vy = mcpY - wristY
+            const angle = Math.atan2(vx, -vy)
+            roi.rc = Math.cos(angle)
+            roi.rs = Math.sin(angle)
+          }
+          // Acquisition frames: a freshly seeded slot uses the Vision hand
+          // directly this frame (its GPU graph starts next frame).
+          const hand = { hand1: slotHands[0]!, hand2: slotHands[1]! }
+          if (runVision) {
+            const vision = nitro.getHandResult()
+            if (!hand.hand1.tracked && box.roi[0]!.valid && vision.hand1.tracked) {
+              hand.hand1 = vision.hand1
+            }
+            if (!hand.hand2.tracked && box.roi[1]!.valid && vision.hand2.tracked) {
+              hand.hand2 = vision.hand2
+            }
+          }
+          const tEnc = performance.now() - tEnc0
+
+          // The lighting passes get their own raw encoder (third submission).
+          const encoder = device.createCommandEncoder()
+
+          // --- JBU + lighting field, every frame ---
+          const reset = box.depthEverRun ? 0 : 1
+          box.depthEverRun = true
+          const computeParams = new ArrayBuffer(48)
+          const cpU32 = new Uint32Array(computeParams)
+          const cpF32 = new Float32Array(computeParams)
+          cpU32[0] = pipeline.fieldW
+          cpU32[1] = pipeline.fieldH
+          cpU32[2] = reset
+          cpU32[3] = mirrored ? 1 : 0
+          cpF32[4] = depthart.depthW
+          cpF32[5] = depthart.depthH
+          cpF32[6] = cropW
+          cpF32[7] = cropH
+          cpF32[8] = cropOffX
+          cpF32[9] = cropOffY
+          device.queue.writeBuffer(pipeline.computeParamsBuffer, 0, computeParams)
+
+          const depthBindGroup = device.createBindGroup({
+            layout: pipeline.depthPreparePipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: pipeline.computeParamsBuffer } },
+              { binding: 1, resource: { buffer: depthart.disparityRawBuffer } },
+              { binding: 2, resource: { buffer: pipeline.historyBuffer } },
+              { binding: 3, resource: pipeline.sampler },
+              { binding: 4, resource: externalTexture },
+              { binding: 5, resource: { buffer: depthart.rangeRawBuffer } },
+            ],
+          })
+          const compute = encoder.beginComputePass()
+          compute.setPipeline(pipeline.depthPreparePipeline)
+          compute.setBindGroup(0, depthBindGroup)
+          compute.dispatchWorkgroups(Math.ceil((pipeline.fieldW * pipeline.fieldH) / 64))
+          compute.setPipeline(pipeline.surfacePipeline)
+          compute.setBindGroup(0, pipeline.surfaceBindGroup)
+          compute.dispatchWorkgroups(
+            Math.ceil(pipeline.fieldW / 8),
+            Math.ceil(pipeline.fieldH / 8),
+          )
+          compute.end()
 
           // --- hand interaction ---
           const prevLightX = box.lightX
           const prevLightY = box.lightY
           let freshHandUpdate = false
-          const hand = nitro.getHandResult()
-          if (controlsNow.handControl && hand.seq >= 0 && hand.seq !== box.lastHandSeq) {
-            box.lastHandSeq = hand.seq
+          if (controlsNow.handControl) {
             // Up to two hands; slot order is unstable across frames, so
             // continuity is matched by proximity, never by slot index.
             const hands = []
@@ -633,23 +915,13 @@ function LightView() {
                     box.lightX += (cx - box.lightX) * 0.06
                     box.lightY += (cy - box.lightY) * 0.06
                     freshHandUpdate = true
-                    let hoverNearest = -1
-                    for (const d of detail) {
-                      const s = d.h.disparity >= 0
-                        ? d.h.disparity
-                        : nitro.sampleDepthMax([
-                            d.h.thumbX, d.h.thumbY,
-                            d.h.indexX, d.h.indexY,
-                            d.h.midX, d.h.midY,
-                          ])
-                      if (s > hoverNearest) hoverNearest = s
+                    // GPU probe result: range-normalized, SAME frame.
+                    let hoverNorm = -1
+                    for (const item of detail) {
+                      const norm = item.h === hand.hand1 ? gd.h1 : gd.h2
+                      if (norm > hoverNorm) hoverNorm = norm
                     }
-                    if (hoverNearest >= 0) {
-                      const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
-                      const hoverNorm = Math.min(
-                        Math.max((hoverNearest - box.rangeLow) / span, 0),
-                        1,
-                      )
+                    if (hoverNorm >= 0) {
                       const hoverZ = (hoverNorm - 1) * Z_FAR + Z_MARGIN
                       box.lightZ += (hoverZ - box.lightZ) * 0.08
                     }
@@ -688,8 +960,8 @@ function LightView() {
                 } else {
                   box.outlierCount = 0
                   if (box.handValid) {
-                    box.handX += (rawX - box.handX) * 0.6
-                    box.handY += (rawY - box.handY) * 0.6
+                    box.handX += (rawX - box.handX) * 0.85
+                    box.handY += (rawY - box.handY) * 0.85
                   } else {
                     box.handX = rawX
                     box.handY = rawY
@@ -706,9 +978,10 @@ function LightView() {
                   }
                 }
                 if (box.grabbed && !isOutlier) {
-                  // Smoothly follow the locked pinch point.
-                  box.lightX += (box.handX - box.lightX) * 0.5
-                  box.lightY += (box.handY - box.lightY) * 0.5
+                  // Follow the locked pinch point tightly - detection is
+                  // same-frame, so smoothing is the only drag latency.
+                  box.lightX += (box.handX - box.lightX) * 0.8
+                  box.lightY += (box.handY - box.lightY) * 0.8
                   freshHandUpdate = true
                   // Light depth = the depth map itself: the fingertips'
                   // disparity (nearest over small tap neighborhoods at
@@ -722,20 +995,9 @@ function LightView() {
                   if (locked.h.handSize > 0) {
                     box.grabbedHandSize = locked.h.handSize
                   }
-                  const nearest = locked.h.disparity >= 0
-                    ? locked.h.disparity
-                    : nitro.sampleDepthMax([
-                        locked.h.thumbX, locked.h.thumbY,
-                        locked.h.indexX, locked.h.indexY,
-                        locked.h.midX, locked.h.midY,
-                      ])
-                  if (nearest >= 0) {
-                    const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
-                    const normalized = Math.min(
-                      Math.max((nearest - box.rangeLow) / span, 0),
-                      1,
-                    )
-                    const targetZ = (normalized - 1) * Z_FAR + Z_MARGIN
+                  const nearestNorm = locked.h === hand.hand1 ? gd.h1 : gd.h2
+                  if (nearestNorm >= 0) {
+                    const targetZ = (nearestNorm - 1) * Z_FAR + Z_MARGIN
                     box.lightZ += (targetZ - box.lightZ) * 0.35
                   }
                 }
@@ -794,24 +1056,10 @@ function LightView() {
           }
           box.lightZ = Math.min(Math.max(box.lightZ, LIGHT_Z_MIN), LIGHT_Z_MAX)
 
-          // Physical invariant: the light can never sit BEHIND the visible
-          // surface at its own screen position - a hand holding it is in
-          // front of that surface by definition of being visible. The small
-          // tolerance still lets the bulb duck just behind a near object
-          // (chair-hiding works: occlusion only needs z < that surface).
-          if (box.everControlled && !controlsNow.touchActive) {
-            const bufLX = mirrored ? 1 - box.lightX : box.lightX
-            const floorSample = nitro.sampleDepthMax([bufLX, box.lightY])
-            if (floorSample >= 0) {
-              const span = Math.max(box.rangeHigh - box.rangeLow, 0.001)
-              const floorNorm = Math.min(
-                Math.max((floorSample - box.rangeLow) / span, 0),
-                1,
-              )
-              const zFloor = (floorNorm - 1) * Z_FAR - 0.12
-              if (box.lightZ < zFloor) box.lightZ = zFloor
-            }
-          }
+          // (The old z-floor sampled the CoreML depth buffer on the CPU;
+          // with GPU-resident depth there is nothing to read - the direct
+          // fingertip z control keeps the light in front of the hand, which
+          // covers the physical case that mattered.)
 
           // --- bulb screen size ---
           // Hand-held: scale by the hand's angular size (Vision handSize is
@@ -820,7 +1068,8 @@ function LightView() {
           // does). Free-flying: perspective from a virtual camera close in
           // front of the scene (must stay above LIGHT_Z_MAX = 0.6).
           {
-            const HAND_SIZE_REF = 0.17
+            // handSize is world-hypot now (was uv-hypot with Vision).
+            const HAND_SIZE_REF = 0.2
             const BULB_CAMERA_Z = 0.85
             let sizeSource = 0
             if (controlsNow.handControl) {
@@ -863,9 +1112,8 @@ function LightView() {
           rpF32[12] = controlsNow.occlusion
           rpU32[13] = controlsNow.mode
           rpU32[14] = mirrored ? 1 : 0
-          // Canvas aspect for the shader's world-space distance math (the
-          // canvas matches the depth model's aspect).
-          rpF32[15] = pipeline.depthW / pipeline.depthH
+          // World-space aspect: the displayed region is the 4:3 crop.
+          rpF32[15] = DISPLAY_ASPECT
           rpF32[16] = cropW
           rpF32[17] = cropH
           rpF32[18] = cropOffX
@@ -897,12 +1145,14 @@ function LightView() {
           pass.setBindGroup(0, bindGroup)
           pass.draw(3)
           pass.end()
+          const tSub0 = performance.now()
           device.queue.submit([encoder.finish()])
           pipeline.context.present()
           externalTexture.destroy()
-          if (depthAccessed) {
-            box.depthMemory!.endAccess(box.depthTexture!)
-          }
+          const tSub = performance.now() - tSub0
+          box.tSync = box.tSync * 0.9 + tSync * 0.1
+          box.tEnc = box.tEnc * 0.9 + tEnc * 0.1
+          box.tSub = box.tSub * 0.9 + tSub * 0.1
 
           // --- stats ---
           box.frameCount += 1
@@ -916,8 +1166,9 @@ function LightView() {
             console.log(
               `[LightDemo] #${box.frameCount} ${box.fps.toFixed(0)}fps ` +
                 `render=${(now - renderStart).toFixed(1)}ms ` +
+                `sync=${box.tSync.toFixed(1)} enc=${box.tEnc.toFixed(1)} wait=${box.tWait.toFixed(1)} sub=${box.tSub.toFixed(1)} ` +
                 `depth#${depth.seq}=${depth.inferenceTimeMs.toFixed(0)}ms ` +
-                `hand#${hand.seq}=${hand.detectionTimeMs.toFixed(0)}ms ` +
+                `roi=[${box.roi[0]!.valid ? 'T' : '.'}${box.roi[1]!.valid ? 'T' : '.'}] ` +
                 `hands=${(hand.hand1.tracked ? 1 : 0) + (hand.hand2.tracked ? 1 : 0)} ` +
                 `pinch=${hand.hand1.pinchRatio.toFixed(2)} ` +
                 `light=(${box.lightX.toFixed(2)},${box.lightY.toFixed(2)},${box.lightZ.toFixed(2)}) ` +
@@ -935,7 +1186,7 @@ function LightView() {
               fps: box.fps,
               renderTimeMs: now - renderStart,
               depthTimeMs: depth.inferenceTimeMs,
-              handTimeMs: hand.detectionTimeMs,
+              handTimeMs: 0,
               frameWidth: frame.width,
               frameHeight: frame.height,
               frameOrientation: frame.orientation,
@@ -948,7 +1199,7 @@ function LightView() {
               pinchRatio: Math.min(hand.hand1.pinchRatio, hand.hand2.pinchRatio),
               grabbed: box.grabbed,
               depthSeq: depth.seq,
-              handSeq: hand.seq,
+              handSeq: box.frameCount,
             })
           }
         } finally {
@@ -961,7 +1212,7 @@ function LightView() {
         frame.dispose()
       }
     },
-    [pipeline, device, nitro, box, rnwgpu],
+    [pipeline, device, nitro, depthart, box, rnwgpu],
   )
 
   // Synchronous depth makes the frame callback take ~1 model interval, so
@@ -1044,13 +1295,26 @@ function LightView() {
         onTouchEnd={() => {
           setControls((c) => ({ ...c, touchActive: false }))
         }}>
-        <Canvas ref={ref} style={styles.canvas} />
+        <Canvas
+          ref={ref}
+          style={[
+            styles.canvas,
+            // Largest 4:3 rect that fits the window (minus HUD strip):
+            // RN's aspectRatio+maxHeight combo clamps height AFTER
+            // computing it, silently stretching the canvas.
+            window.width / (window.height - 120) > 4 / 3
+              ? { height: window.height - 120, width: ((window.height - 120) * 4) / 3 }
+              : { width: window.width, height: (window.width * 3) / 4 },
+          ]}
+        />
         {(nitro == null || pipeline == null || (status?.frameCount ?? 0) === 0) && (
           <View style={styles.loadingOverlay} pointerEvents="none">
             <ActivityIndicator size="large" color="#ffffff" />
             <Text style={styles.loadingText}>
               {nitro == null
                 ? 'Loading depth model…'
+                : cameraDevice == null
+                  ? 'Waiting for USB camera…'
                 : pipeline == null
                   ? 'Preparing GPU pipelines…'
                   : 'Starting camera…'}
@@ -1133,7 +1397,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  canvas: { flex: 1 },
+  canvas: { alignSelf: 'center' },
   center: {
     flex: 1,
     backgroundColor: 'black',

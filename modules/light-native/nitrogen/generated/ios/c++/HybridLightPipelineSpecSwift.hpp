@@ -90,13 +90,19 @@ namespace margelo::nitro::lightnative {
 
   public:
     // Methods
-    inline DepthResult analyzeSync(const std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>& frame, double orientationDegrees, bool runHands) override {
-      auto __result = _swiftPart.analyzeSync(frame, std::forward<decltype(orientationDegrees)>(orientationDegrees), std::forward<decltype(runHands)>(runHands));
+    inline DepthResult analyzeSync(const std::shared_ptr<margelo::nitro::camera::HybridFrameSpec>& frame, double orientationDegrees, bool runHands, bool runDepth) override {
+      auto __result = _swiftPart.analyzeSync(frame, std::forward<decltype(orientationDegrees)>(orientationDegrees), std::forward<decltype(runHands)>(runHands), std::forward<decltype(runDepth)>(runDepth));
       if (__result.hasError()) [[unlikely]] {
         std::rethrow_exception(__result.error());
       }
       auto __value = std::move(__result.value());
       return __value;
+    }
+    inline void waitForHands() override {
+      auto __result = _swiftPart.waitForHands();
+      if (__result.hasError()) [[unlikely]] {
+        std::rethrow_exception(__result.error());
+      }
     }
     inline DepthResult getDepthResult() override {
       auto __result = _swiftPart.getDepthResult();

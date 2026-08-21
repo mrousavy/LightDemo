@@ -1,0 +1,13 @@
+diff --git a/tgpu.js b/tgpu.js
+index 2374a7d99bdaaf3333240007e5afbff776c63c09..8a9161f9b4b472c1c166a8f2aaf1d2ba20df2d3a 100644
+--- a/tgpu.js
++++ b/tgpu.js
+@@ -14,4 +14,7 @@ export { computeFn } from "./core/function/tgpuComputeFn.js";
+ export { fragmentFn } from "./core/function/tgpuFragmentFn.js";
+ export { vertexFn } from "./core/function/tgpuVertexFn.js";
+ export { unroll } from "./core/unroll/tgpuUnroll.js";
+-export * as '~unstable' from "./tgpuUnstable.js";
++// LIGHTDEMO PATCH: string-named namespace re-exports (`export * as
++// '~unstable'`) break Babel 7's export-namespace-from transform (it emits
++// invalid `exports.~unstable`). Nothing consumes the module-level
++// '~unstable' export (the runtime API lives on root['~unstable']).

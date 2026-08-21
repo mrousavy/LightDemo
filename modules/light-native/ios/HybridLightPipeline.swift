@@ -31,36 +31,28 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     .workingColorSpace: NSNull(),
     .cacheIntermediates: true,
   ])
-  private var inputBuffer: CVPixelBuffer?
+  private var inputBuffers: [CVPixelBuffer?] = [nil, nil]
+  private var inputParity = 0
   // Reused every prediction: MLFeatureValue holds the pixel buffer by
   // reference, so CoreML sees the freshly rendered contents each frame
   // without per-frame provider/NSObject allocations.
   private var inputProvider: MLDictionaryFeatureProvider?
+  private var lastProvidedInput: CVPixelBuffer?
 
   // Persistent Vision objects: VNSequenceRequestHandler caches state across
   // video frames and avoids the per-frame handler setup cost.
   private let handRequest: VNDetectHumanHandPoseRequest = {
     let request = VNDetectHumanHandPoseRequest()
     request.maximumHandCount = 2
-    // Pin Vision's hand-pose networks OFF the Neural Engine: they otherwise
-    // schedule onto it and CONTEND with our depth prediction running
-    // concurrently (hands wall time ballooned 17.6ms -> 33ms overlapped).
-    if #available(iOS 17.0, *) {
-      let cpu = MLComputeDevice.allComputeDevices.first(where: {
-        if case .cpu = $0 { return true }
-        return false
-      })
-      if let cpu {
-        request.setComputeDevice(cpu, for: .main)
-        request.setComputeDevice(cpu, for: .postProcessing)
-      }
-    }
+    // Vision runs on the Neural Engine (17.6ms) - the ANE is idle now that
+    // depth lives on the GPU, so there is nothing to contend with.
     return request
   }()
   private let sequenceHandler = VNSequenceRequestHandler()
   /// Runs Vision hand detection concurrently with the ANE depth prediction
   /// inside analyzeSync (joined before it returns).
   private let handQueue = DispatchQueue(label: "com.mrousavy.lightdemo.hands", qos: .userInteractive)
+  private var handGroup: DispatchGroup?
 
   // One persistent IOSurface-backed output buffer, handed to CoreML via
   // MLPredictionOptions.outputBackings - the model writes depth into the
@@ -145,7 +137,7 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   }
 
   func analyzeSync(
-    frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool
+    frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool, runDepth: Bool
   ) throws -> DepthResult {
     // Typed Frame handoff: cast the spec to VisionCamera's public
     // NativeFrame protocol for native buffer access.
@@ -171,16 +163,33 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     }
     let prepDone = CACurrentMediaTime()
     if runHands {
-      let group = DispatchGroup()
-      group.enter()
-      handQueue.async { [self] in
-        detectHands(onPreparedInput: input)
-        group.leave()
+      if runDepth {
+        let group = DispatchGroup()
+        group.enter()
+        handQueue.async { [self] in
+          detectHands(onPreparedInput: input)
+          group.leave()
+        }
+        predictDepth(on: input, start: start, prepDone: prepDone)
+        group.wait()
+        attachHandDepth()
+      } else {
+        // GPU-depth mode: fire Vision now; the caller encodes GPU work
+        // while it runs and joins via waitForHands() - SAME-FRAME
+        // landmarks with the detection cost overlapped, not serialized.
+        // Ping-pong input buffers prevent the next frame's prep render
+        // from tearing the buffer Vision is reading.
+        let group = DispatchGroup()
+        group.enter()
+        lock.lock()
+        handGroup = group
+        lock.unlock()
+        handQueue.async { [self] in
+          detectHands(onPreparedInput: input)
+          group.leave()
+        }
       }
-      predictDepth(on: input, start: start, prepDone: prepDone)
-      group.wait()
-      attachHandDepth()
-    } else {
+    } else if runDepth {
       predictDepth(on: input, start: start, prepDone: prepDone)
     }
 
@@ -205,16 +214,21 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   private func prepareModelInput(
     from source: CVPixelBuffer, orientation: CGImagePropertyOrientation
   ) -> CVPixelBuffer? {
-    if inputBuffer == nil {
+    // Two buffers, alternating per call: the async Vision pass may still be
+    // reading the previous frame's buffer while this render runs.
+    inputParity = 1 - inputParity
+    if inputBuffers[inputParity] == nil {
       let attributes: [CFString: Any] = [
         kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
         kCVPixelBufferMetalCompatibilityKey: true,
       ]
+      var created: CVPixelBuffer?
       CVPixelBufferCreate(
         kCFAllocatorDefault, modelWidth, modelHeight, kCVPixelFormatType_32BGRA,
-        attributes as CFDictionary, &inputBuffer)
+        attributes as CFDictionary, &created)
+      inputBuffers[inputParity] = created
     }
-    guard let target = inputBuffer else { return nil }
+    guard let target = inputBuffers[inputParity] else { return nil }
 
     var image = CIImage(cvPixelBuffer: source)
     if orientation != .up {
@@ -245,9 +259,12 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
   ) {
     let output: CVPixelBuffer
     do {
-      if inputProvider == nil {
+      // Input buffers ping-pong now (async Vision reads the other one), so
+      // the provider must track the buffer actually rendered this frame.
+      if inputProvider == nil || lastProvidedInput !== input {
         inputProvider = try MLDictionaryFeatureProvider(
           dictionary: [modelInputName: MLFeatureValue(pixelBuffer: input)])
+        lastProvidedInput = input
       }
       let prediction = try mlModel.prediction(from: inputProvider!, options: predictionOptions)
       guard let buffer = prediction.featureValue(for: modelOutputName)?.imageBufferValue
@@ -505,6 +522,14 @@ final class HybridLightPipeline: HybridLightPipelineSpec {
     // landmark still reads near, that is the hand's true plane. Spurious
     // too-near outliers are rare (model errors bleed toward background).
     return Double(values.max()!)
+  }
+
+  func waitForHands() throws {
+    lock.lock()
+    let group = handGroup
+    handGroup = nil
+    lock.unlock()
+    group?.wait()
   }
 
   func getHandResult() throws -> HandResult {

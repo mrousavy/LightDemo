@@ -15,7 +15,8 @@ public protocol HybridLightPipelineSpec_protocol: HybridObject {
   var depthHeight: Double { get }
 
   // Methods
-  func analyzeSync(frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool) throws -> DepthResult
+  func analyzeSync(frame: (any HybridFrameSpec), orientationDegrees: Double, runHands: Bool, runDepth: Bool) throws -> DepthResult
+  func waitForHands() throws -> Void
   func getDepthResult() throws -> DepthResult
   func getHandResult() throws -> HandResult
   func sampleDepthMax(points: [Double]) throws -> Double

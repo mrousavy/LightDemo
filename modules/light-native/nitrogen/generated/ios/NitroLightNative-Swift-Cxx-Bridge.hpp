@@ -236,6 +236,15 @@ namespace margelo::nitro::lightnative::bridge::swift {
     return Result<DepthResult>::withError(error);
   }
   
+  // pragma MARK: Result<void>
+  using Result_void_ = Result<void>;
+  inline Result_void_ create_Result_void_() noexcept {
+    return Result<void>::withValue();
+  }
+  inline Result_void_ create_Result_void_(const std::exception_ptr& error) noexcept {
+    return Result<void>::withError(error);
+  }
+  
   // pragma MARK: Result<HandResult>
   using Result_HandResult_ = Result<HandResult>;
   inline Result_HandResult_ create_Result_HandResult_(const HandResult& value) noexcept {
@@ -252,15 +261,6 @@ namespace margelo::nitro::lightnative::bridge::swift {
   }
   inline Result_double_ create_Result_double_(const std::exception_ptr& error) noexcept {
     return Result<double>::withError(error);
-  }
-  
-  // pragma MARK: Result<void>
-  using Result_void_ = Result<void>;
-  inline Result_void_ create_Result_void_() noexcept {
-    return Result<void>::withValue();
-  }
-  inline Result_void_ create_Result_void_(const std::exception_ptr& error) noexcept {
-    return Result<void>::withError(error);
   }
   
   // pragma MARK: Result<LightControls>

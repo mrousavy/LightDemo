@@ -83,15 +83,15 @@ const BULB_OCCLUSION_SOFTNESS = 0.02;
 const BULB_SOURCE_SOFTNESS = 0.08;
 const BULB_SAMPLE_SPREAD = 0.6;
 
-const SHADOW_STEPS = 32;
+const SHADOW_STEPS = 40;
 const SHADOW_SPAN = 0.3;
 const SHADOW_BASELINE = 0.005;
-const SHADOW_BIAS = 0.014;
-const SHADOW_SLOPE_BIAS = 0.02;
+const SHADOW_BIAS = 0.022;
+const SHADOW_SLOPE_BIAS = 0.032;
 const SHADOW_THICKNESS = 0.7;
 const SHADOW_THICKNESS_GROWTH = 2.6;
-const SHADOW_SOFTNESS = 0.089;
-const SHADOW_GAIN = 2.5;
+const SHADOW_SOFTNESS = 0.15;
+const SHADOW_GAIN = 2.1;
 const SHADOW_FRONT_FADE = 0.2;
 `;
 
@@ -101,26 +101,33 @@ struct ComputeParams {
   size: vec2u,        // FIELD size in texels
   reset: u32,         // 1 = skip EMAs (first frame after camera change)
   mirror: u32,        // 1 = surface texture written mirrored in x
-  range: vec2f,       // stabilized (low, high) disparity range
-  cropScale: vec2f,   // model-crop uv -> oriented camera uv (no mirror)
+  modelSize: vec2f,   // disparity grid size in texels (anamorphic full-frame)
+  cropScale: vec2f,   // model uv -> oriented camera uv (identity: full frame)
   cropOffset: vec2f,
   _pad: vec2f,
 }
 `;
 
-// Pass A: normalize disparity by the stabilized range + motion-adaptive
-// temporal EMA into the persistent history buffer. The disparity texture is
-// CoreML's output IOSurface imported directly into WebGPU (r16float) -
-// the depth map never touches the CPU.
+// Pass A: normalize disparity by the GPU-computed 2-98% range +
+// motion-adaptive temporal EMA into the persistent history buffer. The
+// disparity comes straight from the DepthART inference output buffer (hwc4:
+// one vec4 per pixel, value in .x) and the range from the GPU histogram
+// estimator - the depth map never exists anywhere but GPU memory.
 export const DEPTH_PREPARE_SHADER = /* wgsl */ `
 ${CONSTANTS}
 ${COMPUTE_PARAMS}
 
 @group(0) @binding(0) var<uniform> params: ComputeParams;
-@group(0) @binding(1) var disparityTex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read> disparity: array<vec4f>;
 @group(0) @binding(2) var<storage, read_write> history: array<f32>;
 @group(0) @binding(3) var disparitySampler: sampler;
 @group(0) @binding(4) var cameraTex: texture_external;
+@group(0) @binding(5) var<storage, read> disparityRange: vec2f;
+
+fn disparityAt(coord: vec2f) -> f32 {
+  let c = vec2i(clamp(coord, vec2f(0.0), params.modelSize - 1.0));
+  return disparity[u32(c.y) * u32(params.modelSize.x) + u32(c.x)].x;
+}
 
 fn cameraLuma(uv: vec2f) -> f32 {
   let c = textureSampleBaseClampToEdge(
@@ -133,8 +140,8 @@ fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
   let index = gid.x;
   if (index >= params.size.x * params.size.y) { return; }
   let coord = vec2i(i32(index % params.size.x), i32(index / params.size.x));
-  let low = params.range.x;
-  let span = max(params.range.y - low, 0.001);
+  let low = disparityRange.x;
+  let span = max(disparityRange.y - low, 0.001);
   let fieldUv = (vec2f(coord) + 0.5) / vec2f(params.size);
   // Joint bilateral upsampling: reconstruct the model-resolution disparity
   // at field resolution GUIDED BY THE CAMERA IMAGE. Plain bilinear smears
@@ -142,8 +149,7 @@ fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
   // into blocky fringes at silhouettes (arms, head). Weighting each model
   // texel by how much its camera pixel resembles ours snaps depth edges to
   // IMAGE edges - sub-model-texel silhouettes from the same model output.
-  let modelSize = vec2f(params.size) / f32(FIELD_SCALE);
-  let mp = fieldUv * modelSize - 0.5;
+  let mp = fieldUv * params.modelSize - 0.5;
   let baseTexel = floor(mp);
   let centerLuma = cameraLuma(fieldUv);
   var accum = 0.0;
@@ -151,9 +157,8 @@ fn depthPrepare(@builtin(global_invocation_id) gid: vec3u) {
   for (var dy = -1; dy <= 2; dy++) {
     for (var dx = -1; dx <= 2; dx++) {
       let tap = baseTexel + vec2f(f32(dx), f32(dy));
-      let tapUv = (tap + vec2f(0.5)) / modelSize;
-      let disp = textureSampleLevel(disparityTex, disparitySampler, tapUv, 0.0).r;
-      if (disp != disp) { continue; }
+      let tapUv = (tap + vec2f(0.5)) / params.modelSize;
+      let disp = disparityAt(tap);
       let toTap = mp - tap;
       let spatial = exp(-dot(toTap, toTap) * JBU_SPATIAL);
       let lumaDelta = cameraLuma(tapUv) - centerLuma;
