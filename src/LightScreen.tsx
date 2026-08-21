@@ -835,8 +835,8 @@ function LightView() {
                 } else {
                   box.outlierCount = 0
                   if (box.handValid) {
-                    box.handX += (rawX - box.handX) * 0.6
-                    box.handY += (rawY - box.handY) * 0.6
+                    box.handX += (rawX - box.handX) * 0.85
+                    box.handY += (rawY - box.handY) * 0.85
                   } else {
                     box.handX = rawX
                     box.handY = rawY
@@ -853,9 +853,10 @@ function LightView() {
                   }
                 }
                 if (box.grabbed && !isOutlier) {
-                  // Smoothly follow the locked pinch point.
-                  box.lightX += (box.handX - box.lightX) * 0.5
-                  box.lightY += (box.handY - box.lightY) * 0.5
+                  // Follow the locked pinch point tightly - detection is
+                  // same-frame, so smoothing is the only drag latency.
+                  box.lightX += (box.handX - box.lightX) * 0.8
+                  box.lightY += (box.handY - box.lightY) * 0.8
                   freshHandUpdate = true
                   // Light depth = the depth map itself: the fingertips'
                   // disparity (nearest over small tap neighborhoods at
