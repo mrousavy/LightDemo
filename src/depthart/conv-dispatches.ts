@@ -15,6 +15,7 @@ import type { WeightTranspose } from './gpu-resources.ts';
 import { convertWeightToHalf } from './half-weights.ts';
 import {
   depthwise3x3Kernel,
+  depthwise5x5Kernel,
   depthwiseHorizontalAxisKernel,
   depthwiseVerticalAxisKernel,
 } from './kernels/depthwise.ts';
@@ -34,6 +35,7 @@ import {
   nativeF16Conv1x1Kernel,
   nativeF16Conv3x3Kernel,
   nativeF16Depthwise3x3Kernel,
+  nativeF16Depthwise5x5Kernel,
   nativeF16DepthwiseHorizontalAxisKernel,
   nativeF16DepthwiseVerticalAxisKernel,
   nativeF16DestinationIsF16Slot,
@@ -41,6 +43,7 @@ import {
 } from './kernels/native-f16-conv.ts';
 import {
   packedF16Depthwise3x3Kernel,
+  packedF16Depthwise5x5Kernel,
   packedF16DepthwiseHorizontalAxisKernel,
   packedF16DepthwiseVerticalAxisKernel,
 } from './kernels/packed-f16-conv.ts';
@@ -77,6 +80,12 @@ const DEPTHWISE_KERNELS = {
     f32: depthwise3x3Kernel,
     packed: packedF16Depthwise3x3Kernel,
     native: nativeF16Depthwise3x3Kernel,
+  },
+  // LIGHTDEMO PATCH: 5x5 square depthwise (hand-landmark bundles).
+  square5: {
+    f32: depthwise5x5Kernel,
+    packed: packedF16Depthwise5x5Kernel,
+    native: nativeF16Depthwise5x5Kernel,
   },
   horizontal: {
     f32: depthwiseHorizontalAxisKernel,
@@ -310,9 +319,16 @@ function buildDepthwiseConv(ctx: DispatchContext, record: ConvRecord, env: ConvE
   const [kernelHeight, kernelWidth] = record.params.kernel;
   const [strideY, strideX] = record.params.stride;
   const [padTop, padLeft] = record.params.padding;
+  if (kernelHeight === kernelWidth && kernelHeight !== 3 && kernelHeight !== 5) {
+    throw new Error(
+      `Unsupported square depthwise kernel ${kernelHeight}x${kernelWidth} - only 3x3 and 5x5 exist`,
+    );
+  }
   const kernels =
     kernelHeight === kernelWidth
-      ? DEPTHWISE_KERNELS.square
+      ? kernelHeight === 5
+        ? DEPTHWISE_KERNELS.square5
+        : DEPTHWISE_KERNELS.square
       : kernelHeight === 1
         ? DEPTHWISE_KERNELS.horizontal
         : DEPTHWISE_KERNELS.vertical;

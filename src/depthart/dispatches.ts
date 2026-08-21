@@ -48,7 +48,7 @@ import {
   unaryLayout,
 } from './kernels/layouts.ts';
 import { createSpecializedLayerNormKernel } from './kernels/normalization.ts';
-import { averagePoolKernel } from './kernels/pooling.ts';
+import { averagePoolKernel, maxPoolKernel } from './kernels/pooling.ts';
 import {
   bilinearAlignCornersResizeKernel,
   bilinearHalfPixelResizeKernel,
@@ -133,6 +133,9 @@ export function createDepthDispatches(
         break;
       case 'avg-pool2d':
         buildAveragePool(ctx, record);
+        break;
+      case 'max-pool2d':
+        buildMaxPool(ctx, record);
         break;
       case 'resize2d':
         buildResize(ctx, record);
@@ -303,6 +306,40 @@ function buildAveragePool(ctx: DispatchContext, record: DepthDispatchOf<'avg-poo
   ctx.dispatches.push({
     pipeline: ctx.pipelineFor('average-pool', () =>
       ctx.root.createComputePipeline({ compute: averagePoolKernel }),
+    ),
+    bindGroup: ctx.root.createBindGroup(poolLayout, {
+      params,
+      src: ctx.arena.rawBufferFor(src.id),
+      dst: ctx.arena.rawBufferFor(dst.id),
+    }),
+    workgroups: { x: record.workgroups[0] },
+  });
+}
+
+// LIGHTDEMO PATCH: native max pool (see kernels/pooling.ts).
+function buildMaxPool(ctx: DispatchContext, record: DepthDispatchOf<'max-pool2d'>): void {
+  const src = dispatchTensor(ctx.bundle, record, 'inputs', 0);
+  const dst = dispatchTensor(ctx.bundle, record, 'outputs', 0);
+  const inputShape = hwc4Shape(src);
+  const outputShape = hwc4Shape(dst);
+  const [windowHeight, windowWidth] = record.params.kernel;
+  const [strideY, strideX] = record.params.stride;
+  const params = ctx.uniform(PoolUniforms, {
+    inputWidth: inputShape.width,
+    inputHeight: inputShape.height,
+    outputWidth: outputShape.width,
+    outputHeight: outputShape.height,
+    channelBlocks: outputShape.channelBlocks,
+    logicalChannels: outputShape.channels,
+    windowWidth,
+    windowHeight,
+    strideX,
+    strideY,
+    elementCount: outputShape.elementCount,
+  });
+  ctx.dispatches.push({
+    pipeline: ctx.pipelineFor('max-pool', () =>
+      ctx.root.createComputePipeline({ compute: maxPoolKernel }),
     ),
     bindGroup: ctx.root.createBindGroup(poolLayout, {
       params,

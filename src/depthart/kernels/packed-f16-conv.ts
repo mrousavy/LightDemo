@@ -31,5 +31,6 @@ const packedKernels = createDepthwiseKernels<d.v4f>({
 });
 
 export const packedF16Depthwise3x3Kernel = packedKernels.kernel3x3;
+export const packedF16Depthwise5x5Kernel = packedKernels.kernel5x5;
 export const packedF16DepthwiseHorizontalAxisKernel = packedKernels.horizontalAxisKernel;
 export const packedF16DepthwiseVerticalAxisKernel = packedKernels.verticalAxisKernel;

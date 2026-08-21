@@ -366,5 +366,6 @@ const nativeDepthwiseKernels = createDepthwiseKernels<d.v4h>({
 });
 
 export const nativeF16Depthwise3x3Kernel = nativeDepthwiseKernels.kernel3x3;
+export const nativeF16Depthwise5x5Kernel = nativeDepthwiseKernels.kernel5x5;
 export const nativeF16DepthwiseHorizontalAxisKernel = nativeDepthwiseKernels.horizontalAxisKernel;
 export const nativeF16DepthwiseVerticalAxisKernel = nativeDepthwiseKernels.verticalAxisKernel;

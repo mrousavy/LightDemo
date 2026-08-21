@@ -30,42 +30,53 @@ interface DepthwiseVariant<TVec extends d.v4f | d.v4h> {
   readonly store: (index: number, value: d.v4f) => void;
 }
 
-/** The {3x3, 1x7, 7x1} depthwise kernel family over one storage variant */
+/** The {3x3, 5x5, 1x7, 7x1} depthwise kernel family over one storage variant */
 export const createDepthwiseKernels = <TVec extends d.v4f | d.v4h>(
   variant: DepthwiseVariant<TVec>,
 ) => {
   const { layout, sourceAt, weightAt, biasAt, accumulate, store } = variant;
 
-  const convolve3x3 = (index: number) => {
-    'use gpu';
-    const params = layout.$.params;
-    const output = blockedElement(index, params.outputWidth, params.channelBlocks);
-    let accumulator = biasAt(output.z);
-    for (const ky of tgpu.unroll([0, 1, 2])) {
-      const inputY = inputCoordinate(output.y, ky, params.strideY, params.padY);
-      if (!coordinateOutOfBounds(inputY, params.inputHeight)) {
-        for (const kx of tgpu.unroll([0, 1, 2])) {
-          const inputX = inputCoordinate(output.x, kx, params.strideX, params.padX);
-          if (!coordinateOutOfBounds(inputX, params.inputWidth)) {
-            const source = sourceAt(
-              hwc4Index(
-                d.u32(inputY),
-                d.u32(inputX),
-                output.z,
-                params.inputWidth,
-                params.channelBlocks,
-              ),
-            );
-            accumulator = accumulate(accumulator, source, weightAt(output.z * 9 + ky * 3 + kx));
+  // LIGHTDEMO PATCH: generalized from the fixed 3x3 unroll so 5x5 square
+  // depthwise convs (MediaPipe hand-landmark) run as ONE dispatch instead of
+  // the converter's 14-dispatch separable decomposition.
+  const makeSquareConvolve = (kernelSize: number, taps: readonly number[]) => {
+    return (index: number) => {
+      'use gpu';
+      const params = layout.$.params;
+      const output = blockedElement(index, params.outputWidth, params.channelBlocks);
+      let accumulator = biasAt(output.z);
+      for (const ky of tgpu.unroll(taps)) {
+        const inputY = inputCoordinate(output.y, ky, params.strideY, params.padY);
+        if (!coordinateOutOfBounds(inputY, params.inputHeight)) {
+          for (const kx of tgpu.unroll(taps)) {
+            const inputX = inputCoordinate(output.x, kx, params.strideX, params.padX);
+            if (!coordinateOutOfBounds(inputX, params.inputWidth)) {
+              const source = sourceAt(
+                hwc4Index(
+                  d.u32(inputY),
+                  d.u32(inputX),
+                  output.z,
+                  params.inputWidth,
+                  params.channelBlocks,
+                ),
+              );
+              accumulator = accumulate(
+                accumulator,
+                source,
+                weightAt(output.z * (kernelSize * kernelSize) + ky * kernelSize + kx),
+              );
+            }
           }
         }
       }
-    }
-    store(
-      index,
-      maskPaddedChannels(activationSlot.$(accumulator), output.z, params.logicalChannels),
-    );
+      store(
+        index,
+        maskPaddedChannels(activationSlot.$(accumulator), output.z, params.logicalChannels),
+      );
+    };
   };
+  const convolve3x3 = makeSquareConvolve(3, [0, 1, 2]);
+  const convolve5x5 = makeSquareConvolve(5, [0, 1, 2, 3, 4]);
 
   const axisConvolve = (index: number, horizontal: boolean) => {
     'use gpu';
@@ -119,6 +130,7 @@ export const createDepthwiseKernels = <TVec extends d.v4f | d.v4h>(
 
   return {
     kernel3x3: guarded(convolve3x3),
+    kernel5x5: guarded(convolve5x5),
     horizontalAxisKernel: guarded((index: number) => {
       'use gpu';
       axisConvolve(index, true);
@@ -159,5 +171,6 @@ const f32Kernels = createDepthwiseKernels<d.v4f>({
 });
 
 export const depthwise3x3Kernel = f32Kernels.kernel3x3;
+export const depthwise5x5Kernel = f32Kernels.kernel5x5;
 export const depthwiseHorizontalAxisKernel = f32Kernels.horizontalAxisKernel;
 export const depthwiseVerticalAxisKernel = f32Kernels.verticalAxisKernel;

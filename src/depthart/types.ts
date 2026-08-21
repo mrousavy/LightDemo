@@ -37,6 +37,8 @@ export const DepthActivation = {
   Gelu: 'gelu',
   Silu: 'silu',
   Relu: 'relu',
+  // LIGHTDEMO PATCH: fused relu6 for the hand-landmark bundles.
+  Relu6: 'relu6',
 } as const;
 export type DepthActivation = (typeof DepthActivation)[keyof typeof DepthActivation];
 
@@ -240,6 +242,11 @@ export type DepthDispatch =
     })
   | (DepthDispatchBase & {
       readonly op: 'avg-pool2d';
+      readonly params: DepthAveragePool2dParams;
+    })
+  | (DepthDispatchBase & {
+      // LIGHTDEMO PATCH: native max pool (hand-landmark bundles).
+      readonly op: 'max-pool2d';
       readonly params: DepthAveragePool2dParams;
     })
   | (DepthDispatchBase & {

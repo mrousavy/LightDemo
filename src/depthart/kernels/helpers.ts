@@ -77,6 +77,13 @@ export const relu = (value: d.v4f) => {
   return std.max(value, d.vec4f(0));
 };
 
+// LIGHTDEMO PATCH: fused relu6 (MediaPipe hand-landmark) - replaces the
+// converter's 3-dispatch relu(x) - relu(relu(x) - 6) emulation.
+export const relu6 = (value: d.v4f) => {
+  'use gpu';
+  return std.clamp(value, d.vec4f(0), d.vec4f(6));
+};
+
 export const negated =
   (activation: Vec4Activation): Vec4Activation =>
   (value) => {

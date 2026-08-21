@@ -3,7 +3,7 @@ import { d } from 'typegpu';
 import type { TgpuComputePipeline, TgpuRoot, TgpuUniform, ValidateUniformSchema } from 'typegpu';
 import type { OwnedGpuResource, PreparedDispatch } from './execution-plan.ts';
 import type { ImmutableWeightStorage, PackedWeightBuffer } from './gpu-resources.ts';
-import { geluExact, identityActivation, relu, silu } from './kernels/helpers.ts';
+import { geluExact, identityActivation, relu, relu6, silu } from './kernels/helpers.ts';
 import { MAX_COMPUTE_WORKGROUPS_PER_DIMENSION } from './kernels/types.ts';
 import type { DepthTensorArena } from './tensor-arena.ts';
 import {
@@ -98,6 +98,7 @@ export const ACTIVATION_FUNCTIONS = {
   [DepthActivation.Gelu]: geluExact,
   [DepthActivation.Silu]: silu,
   [DepthActivation.Relu]: relu,
+  [DepthActivation.Relu6]: relu6,
 } as const;
 
 export function dispatchTensor(

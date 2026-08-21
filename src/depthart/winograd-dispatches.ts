@@ -84,20 +84,23 @@ function winogradConfig(bundle: DepthBundle, record: DepthDispatch): WinogradCon
     bundle.precision === DepthPrecision.Fp16Native
       ? WINOGRAD_FP16_MINIMUM_OUTPUT_CHANNELS
       : WINOGRAD_MINIMUM_OUTPUT_CHANNELS;
-  if (
-    output.channels < minimumOutputChannels ||
-    input.width !== output.width ||
-    input.height !== output.height
-  ) {
+  if (input.width !== output.width || input.height !== output.height) {
+    return undefined;
+  }
+  const tilesX = Math.ceil(output.width / 4);
+  const tilesY = Math.ceil(output.height / 4);
+  const tileCount = tilesX * tilesY;
+  // LIGHTDEMO PATCH: the channel minimum exists to amortize the tile
+  // transforms, but spatially huge low-channel convs (the DPT head
+  // refinements at 224/448) amortize them through tile count instead.
+  // Threshold keeps 112x112 (784 tiles) and smaller on the direct path.
+  if (output.channels < minimumOutputChannels && tileCount < 2048) {
     return undefined;
   }
   const nativeF16 = weight.dtype === DepthDType.F16;
   if (nativeF16 && input.dtype === DepthDType.F32 && output.dtype === DepthDType.F32) {
     return undefined;
   }
-  const tilesX = Math.ceil(output.width / 4);
-  const tilesY = Math.ceil(output.height / 4);
-  const tileCount = tilesX * tilesY;
   const inputBytes =
     WINOGRAD_F4_COEFFICIENTS * tileCount * input.channelBlocks * (nativeF16 ? 8 : 16);
   const outputBytes = WINOGRAD_F4_COEFFICIENTS * tileCount * output.channelBlocks * 16;
