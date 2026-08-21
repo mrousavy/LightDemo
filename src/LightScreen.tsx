@@ -609,7 +609,10 @@ function LightView() {
             const inst = depthart.hands.instances[slot]!
             inst.roiParams.write({
               center: d.vec2f(roi.cx, roi.cy),
-              size: d.vec2f(roi.s, roi.s),
+              // Square in WORLD units: crop uv is 4:3 anamorphic, and the
+              // landmark model wants undistorted crops - a uv-square ROI
+              // stretched every hand 33% horizontally.
+              size: d.vec2f(roi.s / DISPLAY_ASPECT, roi.s),
               rotation: d.vec2f(roi.rc, roi.rs),
               cropScale: d.vec2f(cropW, cropH),
               cropOffset: d.vec2f(cropOffX, cropOffY),
@@ -638,10 +641,10 @@ function LightView() {
             outputSize: d.vec2u(depthart.depthW, depthart.depthH),
             present: d.vec2u(box.roi[0]!.valid ? 1 : 0, box.roi[1]!.valid ? 1 : 0),
             roi1Center: d.vec2f(box.roi[0]!.cx, box.roi[0]!.cy),
-            roi1Size: d.vec2f(box.roi[0]!.s, box.roi[0]!.s),
+            roi1Size: d.vec2f(box.roi[0]!.s / DISPLAY_ASPECT, box.roi[0]!.s),
             roi1Rot: d.vec2f(box.roi[0]!.rc, box.roi[0]!.rs),
             roi2Center: d.vec2f(box.roi[1]!.cx, box.roi[1]!.cy),
-            roi2Size: d.vec2f(box.roi[1]!.s, box.roi[1]!.s),
+            roi2Size: d.vec2f(box.roi[1]!.s / DISPLAY_ASPECT, box.roi[1]!.s),
             roi2Rot: d.vec2f(box.roi[1]!.rc, box.roi[1]!.rs),
           })
           infPass.setPipeline(depthart.hands.probePipelineRaw)
@@ -730,7 +733,7 @@ function LightView() {
             const lmx = (i: number) => {
               const px = sf[base + i * 3]! / 224 - 0.5
               const py = sf[base + i * 3 + 1]! / 224 - 0.5
-              return roi.cx + (px * roi.rc - py * roi.rs) * roi.s
+              return roi.cx + ((px * roi.rc - py * roi.rs) * roi.s) / DISPLAY_ASPECT
             }
             const lmy = (i: number) => {
               const px = sf[base + i * 3]! / 224 - 0.5
@@ -745,13 +748,20 @@ function LightView() {
             const indexY = lmy(8)
             const mcpX = lmx(9)
             const mcpY = lmy(9)
-            const handSize = Math.max(Math.hypot(mcpX - wristX, mcpY - wristY), 1e-4)
+            // Distances in WORLD units (uv x scaled by aspect) - pinch and
+            // hand size must not depend on the pinch direction.
+            const handSize = Math.max(
+              Math.hypot((mcpX - wristX) * DISPLAY_ASPECT, mcpY - wristY),
+              1e-4,
+            )
             slotHands[slot] = {
               tracked: true,
               thumbX, thumbY, indexX, indexY,
               midX: (thumbX + indexX) / 2,
               midY: (thumbY + indexY) / 2,
-              pinchRatio: Math.hypot(thumbX - indexX, thumbY - indexY) / handSize,
+              pinchRatio:
+                Math.hypot((thumbX - indexX) * DISPLAY_ASPECT, thumbY - indexY) /
+                handSize,
               handSize,
               confidence: presence,
               disparity: -1,
@@ -768,8 +778,10 @@ function LightView() {
             }
             roi.cx = (minX + maxX) / 2
             roi.cy = (minY + maxY) / 2
-            roi.s = Math.min(Math.max(Math.max(maxX - minX, maxY - minY) * 2.4, 0.14), 0.9)
-            const vx = mcpX - wristX
+            // World-unit extent, MediaPipe's own 2.6x expansion.
+            const extent = Math.max((maxX - minX) * DISPLAY_ASPECT, maxY - minY)
+            roi.s = Math.min(Math.max(extent * 2.6, 0.14), 0.9)
+            const vx = (mcpX - wristX) * DISPLAY_ASPECT
             const vy = mcpY - wristY
             const angle = Math.atan2(vx, -vy)
             roi.rc = Math.cos(angle)
@@ -1056,7 +1068,8 @@ function LightView() {
           // does). Free-flying: perspective from a virtual camera close in
           // front of the scene (must stay above LIGHT_Z_MAX = 0.6).
           {
-            const HAND_SIZE_REF = 0.17
+            // handSize is world-hypot now (was uv-hypot with Vision).
+            const HAND_SIZE_REF = 0.2
             const BULB_CAMERA_Z = 0.85
             let sizeSource = 0
             if (controlsNow.handControl) {
