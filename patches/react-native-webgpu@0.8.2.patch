@@ -1,8 +1,11 @@
-diff --git a/node_modules/react-native-webgpu/.bun-tag-fd9422602bdf0f36 b/.bun-tag-fd9422602bdf0f36
+diff --git a/.bun-tag-d5017d4509a79c06 b/.bun-tag-d5017d4509a79c06
 new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+index 0000000..e69de29
+diff --git a/.bun-tag-fd9422602bdf0f36 b/.bun-tag-fd9422602bdf0f36
+new file mode 100644
+index 0000000..e69de29
 diff --git a/apple/WebGPUView.mm b/apple/WebGPUView.mm
-index 33e56374068eec2daed7cb8dda7b64a7db94ae3e..fd3b3ebb4e5600b5242edfa94fef40582a02f9fb 100644
+index 33e5637..fd3b3eb 100644
 --- a/apple/WebGPUView.mm
 +++ b/apple/WebGPUView.mm
 @@ -16,6 +16,16 @@ + (ComponentDescriptorProvider)componentDescriptorProvider {
@@ -22,8 +25,28 @@ index 33e56374068eec2daed7cb8dda7b64a7db94ae3e..fd3b3ebb4e5600b5242edfa94fef4058
  - (void)prepareForRecycle {
    [super prepareForRecycle];
    /*
+diff --git a/cpp/rnwgpu/RNWebGPUManager.cpp b/cpp/rnwgpu/RNWebGPUManager.cpp
+index 871e311..73cf42b 100644
+--- a/cpp/rnwgpu/RNWebGPUManager.cpp
++++ b/cpp/rnwgpu/RNWebGPUManager.cpp
+@@ -24,6 +24,7 @@
+ #include "GPUInternalError.h"
+ #include "GPUOutOfMemoryError.h"
+ #include "GPUPipelineLayout.h"
++#include "GPUDispatchList.h"
+ #include "GPUQuerySet.h"
+ #include "GPUQueue.h"
+ #include "GPURenderBundle.h"
+@@ -106,6 +107,7 @@ RNWebGPUManager::RNWebGPUManager(
+   GPUValidationError::installConstructor(*_jsRuntime);
+   GPUUncapturedErrorEvent::installConstructor(*_jsRuntime);
+   GPUPipelineLayout::installConstructor(*_jsRuntime);
++  GPUDispatchList::installConstructor(*_jsRuntime);
+   GPUQuerySet::installConstructor(*_jsRuntime);
+   GPUQueue::installConstructor(*_jsRuntime);
+   GPURenderBundle::installConstructor(*_jsRuntime);
 diff --git a/cpp/rnwgpu/api/GPUBuffer.cpp b/cpp/rnwgpu/api/GPUBuffer.cpp
-index db698fff788c549a343333360ba3e10c62293a4c..2c2039c7baf232fc887c0e131493f3338826967d 100644
+index db698ff..2c2039c 100644
 --- a/cpp/rnwgpu/api/GPUBuffer.cpp
 +++ b/cpp/rnwgpu/api/GPUBuffer.cpp
 @@ -1,5 +1,6 @@
@@ -104,7 +127,7 @@ index db698fff788c549a343333360ba3e10c62293a4c..2c2039c7baf232fc887c0e131493f333
  
  async::AsyncTaskHandle GPUBuffer::mapAsync(jsi::Runtime &runtime,
 diff --git a/cpp/rnwgpu/api/GPUBuffer.h b/cpp/rnwgpu/api/GPUBuffer.h
-index 1b5cf123ed80c580aa664299a9af86a7f11e4944..d996db160d2625c78e50f43b8d95e282f8a2f434 100644
+index 1b5cf12..d996db1 100644
 --- a/cpp/rnwgpu/api/GPUBuffer.h
 +++ b/cpp/rnwgpu/api/GPUBuffer.h
 @@ -38,6 +38,8 @@ public:
@@ -124,3 +147,273 @@ index 1b5cf123ed80c580aa664299a9af86a7f11e4944..d996db160d2625c78e50f43b8d95e282
      installMethod(runtime, prototype, "unmap", &GPUBuffer::unmap);
      installMethod(runtime, prototype, "destroy", &GPUBuffer::destroy);
      installGetter(runtime, prototype, "size", &GPUBuffer::getSize);
+diff --git a/cpp/rnwgpu/api/GPUComputePassEncoder.cpp b/cpp/rnwgpu/api/GPUComputePassEncoder.cpp
+index b74f273..88f0422 100644
+--- a/cpp/rnwgpu/api/GPUComputePassEncoder.cpp
++++ b/cpp/rnwgpu/api/GPUComputePassEncoder.cpp
+@@ -57,4 +57,20 @@ void GPUComputePassEncoder::insertDebugMarker(std::string markerLabel) {
+   _instance.InsertDebugMarker(markerLabel.c_str());
+ }
+ 
++// LIGHTDEMO PATCH: replay a prebuilt dispatch list with zero per-dispatch
++// JSI cost. Redundant SetPipeline calls (consecutive entries sharing a
++// pipeline) are skipped.
++void GPUComputePassEncoder::executeDispatchList(
++    std::shared_ptr<GPUDispatchList> list) {
++  WGPUComputePipeline last = nullptr;
++  for (const auto &entry : list->get()) {
++    if (entry.pipeline.Get() != last) {
++      _instance.SetPipeline(entry.pipeline);
++      last = entry.pipeline.Get();
++    }
++    _instance.SetBindGroup(0, entry.bindGroup);
++    _instance.DispatchWorkgroups(entry.x, entry.y, entry.z);
++  }
++}
++
+ } // namespace rnwgpu
+\ No newline at end of file
+diff --git a/cpp/rnwgpu/api/GPUComputePassEncoder.h b/cpp/rnwgpu/api/GPUComputePassEncoder.h
+index 1dd8d72..a6ed3a4 100644
+--- a/cpp/rnwgpu/api/GPUComputePassEncoder.h
++++ b/cpp/rnwgpu/api/GPUComputePassEncoder.h
+@@ -15,6 +15,7 @@
+ #include "GPUBindGroup.h"
+ #include "GPUBuffer.h"
+ #include "GPUComputePipeline.h"
++#include "GPUDispatchList.h"
+ 
+ namespace rnwgpu {
+ 
+@@ -45,6 +46,8 @@ public:
+       uint32_t index,
+       std::variant<std::nullptr_t, std::shared_ptr<GPUBindGroup>> bindGroup,
+       std::optional<std::vector<uint32_t>> dynamicOffsets);
++  // LIGHTDEMO PATCH: replay a prebuilt dispatch list in one JSI call.
++  void executeDispatchList(std::shared_ptr<GPUDispatchList> list);
+ 
+   std::string getLabel() { return _label; }
+   void setLabel(const std::string &label) {
+@@ -70,6 +73,8 @@ public:
+                   &GPUComputePassEncoder::insertDebugMarker);
+     installMethod(runtime, prototype, "setBindGroup",
+                   &GPUComputePassEncoder::setBindGroup);
++    installMethod(runtime, prototype, "executeDispatchList",
++                  &GPUComputePassEncoder::executeDispatchList);
+     installGetterSetter(runtime, prototype, "label",
+                         &GPUComputePassEncoder::getLabel,
+                         &GPUComputePassEncoder::setLabel);
+diff --git a/cpp/rnwgpu/api/GPUDevice.cpp b/cpp/rnwgpu/api/GPUDevice.cpp
+index 96c5153..e1a7010 100644
+--- a/cpp/rnwgpu/api/GPUDevice.cpp
++++ b/cpp/rnwgpu/api/GPUDevice.cpp
+@@ -199,6 +199,26 @@ GPUDevice::createQuerySet(std::shared_ptr<GPUQuerySetDescriptor> descriptor) {
+                                        descriptor->label.value_or(""));
+ }
+ 
++// LIGHTDEMO PATCH: resolve the JS array of {pipeline, bindGroup, x, y, z}
++// ONCE into wgpu handles - executeDispatchList replays it with zero JSI.
++std::shared_ptr<GPUDispatchList> GPUDevice::createDispatchList(
++    std::vector<std::shared_ptr<GPUDispatchItem>> items) {
++  std::vector<GPUDispatchList::Entry> entries;
++  entries.reserve(items.size());
++  for (auto &item : items) {
++    if (!item || !item->pipeline || !item->bindGroup) {
++      throw std::runtime_error("GPUDevice::createDispatchList(): every item "
++                               "needs a pipeline and a bindGroup");
++    }
++    entries.push_back(GPUDispatchList::Entry{
++        item->pipeline->get(), item->bindGroup->get(),
++        static_cast<uint32_t>(item->x),
++        static_cast<uint32_t>(item->y.value_or(1)),
++        static_cast<uint32_t>(item->z.value_or(1))});
++  }
++  return std::make_shared<GPUDispatchList>(std::move(entries), "");
++}
++
+ std::shared_ptr<GPURenderBundleEncoder> GPUDevice::createRenderBundleEncoder(
+     std::shared_ptr<GPURenderBundleEncoderDescriptor> descriptor) {
+   Convertor conv;
+diff --git a/cpp/rnwgpu/api/GPUDevice.h b/cpp/rnwgpu/api/GPUDevice.h
+index 58b1dd6..dcddf7c 100644
+--- a/cpp/rnwgpu/api/GPUDevice.h
++++ b/cpp/rnwgpu/api/GPUDevice.h
+@@ -38,6 +38,8 @@
+ #include "GPUPipelineLayoutDescriptor.h"
+ #include "GPUQuerySet.h"
+ #include "GPUQuerySetDescriptor.h"
++#include "GPUDispatchItem.h"
++#include "GPUDispatchList.h"
+ #include "GPUQueue.h"
+ #include "GPURenderBundleEncoder.h"
+ #include "GPURenderBundleEncoderDescriptor.h"
+@@ -147,6 +149,9 @@ public:
+       std::shared_ptr<GPURenderBundleEncoderDescriptor> descriptor);
+   std::shared_ptr<GPUQuerySet>
+   createQuerySet(std::shared_ptr<GPUQuerySetDescriptor> descriptor);
++  // LIGHTDEMO PATCH: pre-resolved dispatch list for 1-call replay.
++  std::shared_ptr<GPUDispatchList> createDispatchList(
++      std::vector<std::shared_ptr<GPUDispatchItem>> items);
+   void pushErrorScope(wgpu::ErrorFilter filter);
+   async::AsyncTaskHandle popErrorScope(jsi::Runtime &runtime);
+ 
+@@ -204,6 +209,8 @@ public:
+                   &GPUDevice::createRenderBundleEncoder);
+     installMethod(runtime, prototype, "createQuerySet",
+                   &GPUDevice::createQuerySet);
++    installMethod(runtime, prototype, "createDispatchList",
++                  &GPUDevice::createDispatchList);
+     installMethod(runtime, prototype, "pushErrorScope",
+                   &GPUDevice::pushErrorScope);
+     installMethodWithRuntime(runtime, prototype, "popErrorScope",
+diff --git a/cpp/rnwgpu/api/GPUDispatchList.h b/cpp/rnwgpu/api/GPUDispatchList.h
+new file mode 100644
+index 0000000..c1e4beb
+--- /dev/null
++++ b/cpp/rnwgpu/api/GPUDispatchList.h
+@@ -0,0 +1,64 @@
++#pragma once
++
++#include <memory>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "Unions.h"
++
++#include "NativeObject.h"
++
++#include "webgpu/webgpu_cpp.h"
++
++namespace rnwgpu {
++
++namespace jsi = facebook::jsi;
++
++/**
++ * LIGHTDEMO PATCH: an immutable, pre-resolved list of compute dispatches
++ * (pipeline + bind group + workgroup counts). Built once via
++ * GPUDevice.createDispatchList() and replayed each frame with
++ * GPUComputePassEncoder.executeDispatchList() - the per-frame cost is a
++ * single JSI call instead of 3 calls per dispatch (measured ~6ms/frame of
++ * Hermes/JSI overhead for ~850 dispatches in LightDemo).
++ */
++class GPUDispatchList : public NativeObject<GPUDispatchList> {
++public:
++  static constexpr const char *CLASS_NAME = "GPUDispatchList";
++
++  struct Entry {
++    wgpu::ComputePipeline pipeline;
++    wgpu::BindGroup bindGroup;
++    uint32_t x;
++    uint32_t y;
++    uint32_t z;
++  };
++
++  explicit GPUDispatchList(std::vector<Entry> entries, std::string label)
++      : NativeObject(CLASS_NAME), _entries(std::move(entries)),
++        _label(std::move(label)) {}
++
++public:
++  std::string getBrand() { return CLASS_NAME; }
++
++  double getCount() { return static_cast<double>(_entries.size()); }
++
++  std::string getLabel() { return _label; }
++  void setLabel(const std::string &label) { _label = label; }
++
++  static void definePrototype(jsi::Runtime &runtime, jsi::Object &prototype) {
++    installGetter(runtime, prototype, "__brand", &GPUDispatchList::getBrand);
++    installGetter(runtime, prototype, "count", &GPUDispatchList::getCount);
++    installGetterSetter(runtime, prototype, "label", &GPUDispatchList::getLabel,
++                        &GPUDispatchList::setLabel);
++  }
++
++  inline const std::vector<Entry> &get() { return _entries; }
++
++private:
++  std::vector<Entry> _entries;
++  std::string _label;
++};
++
++} // namespace rnwgpu
+diff --git a/cpp/rnwgpu/api/descriptors/GPUDispatchItem.h b/cpp/rnwgpu/api/descriptors/GPUDispatchItem.h
+new file mode 100644
+index 0000000..471b619
+--- /dev/null
++++ b/cpp/rnwgpu/api/descriptors/GPUDispatchItem.h
+@@ -0,0 +1,75 @@
++#pragma once
++
++#include <memory>
++#include <string>
++
++#include "webgpu/webgpu_cpp.h"
++
++#include "JSIConverter.h"
++#include "WGPULogger.h"
++
++#include "GPUBindGroup.h"
++#include "GPUComputePipeline.h"
++
++namespace jsi = facebook::jsi;
++
++namespace rnwgpu {
++
++/**
++ * LIGHTDEMO PATCH: one element of GPUDevice.createDispatchList()'s input -
++ * {pipeline, bindGroup, x, y?, z?}.
++ */
++struct GPUDispatchItem {
++  std::shared_ptr<GPUComputePipeline> pipeline; // GPUComputePipeline
++  std::shared_ptr<GPUBindGroup> bindGroup;      // GPUBindGroup
++  double x = 1;                                 // GPUSize32
++  std::optional<double> y;                      // GPUSize32
++  std::optional<double> z;                      // GPUSize32
++};
++
++} // namespace rnwgpu
++
++namespace rnwgpu {
++
++template <> struct JSIConverter<std::shared_ptr<rnwgpu::GPUDispatchItem>> {
++  static std::shared_ptr<rnwgpu::GPUDispatchItem>
++  fromJSI(jsi::Runtime &runtime, const jsi::Value &arg, bool outOfBounds) {
++    auto result = std::make_unique<rnwgpu::GPUDispatchItem>();
++    if (!outOfBounds && arg.isObject()) {
++      auto value = arg.getObject(runtime);
++      if (value.hasProperty(runtime, "pipeline")) {
++        auto prop = value.getProperty(runtime, "pipeline");
++        result->pipeline =
++            JSIConverter<std::shared_ptr<GPUComputePipeline>>::fromJSI(
++                runtime, prop, false);
++      }
++      if (value.hasProperty(runtime, "bindGroup")) {
++        auto prop = value.getProperty(runtime, "bindGroup");
++        result->bindGroup = JSIConverter<std::shared_ptr<GPUBindGroup>>::fromJSI(
++            runtime, prop, false);
++      }
++      if (value.hasProperty(runtime, "x")) {
++        auto prop = value.getProperty(runtime, "x");
++        result->x = JSIConverter<double>::fromJSI(runtime, prop, false);
++      }
++      if (value.hasProperty(runtime, "y")) {
++        auto prop = value.getProperty(runtime, "y");
++        result->y =
++            JSIConverter<std::optional<double>>::fromJSI(runtime, prop, false);
++      }
++      if (value.hasProperty(runtime, "z")) {
++        auto prop = value.getProperty(runtime, "z");
++        result->z =
++            JSIConverter<std::optional<double>>::fromJSI(runtime, prop, false);
++      }
++    }
++
++    return result;
++  }
++  static jsi::Value toJSI(jsi::Runtime &runtime,
++                          std::shared_ptr<rnwgpu::GPUDispatchItem> arg) {
++    throw std::runtime_error("Invalid GPUDispatchItem::toJSI()");
++  }
++};
++
++} // namespace rnwgpu
